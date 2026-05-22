@@ -145,6 +145,8 @@ public:
     // Per-cell per-substrate arrays (size = max_cells * n_substrates)
     double* secretion_rate;
     double* uptake_rate;
+    double* saturation_density;
+    double* net_export_rate;
 
     // ── Custom data — dynamic key-value store (one double per key per cell) ──
     static constexpr uint32_t MAX_CUSTOM_VARS = 16;

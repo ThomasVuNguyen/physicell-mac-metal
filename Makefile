@@ -46,6 +46,7 @@ CPP_SRCS = $(SRC_DIR)/cell_data.cpp \
            $(SRC_DIR)/behaviors.cpp \
            $(SRC_DIR)/rules.cpp \
            $(SRC_DIR)/svg_writer.cpp \
+           $(SRC_DIR)/matlab_writer.cpp \
            $(LIB_DIR)/pugixml/pugixml.cpp
 
 # Metal shader files

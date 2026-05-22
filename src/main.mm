@@ -9,6 +9,7 @@
 #include "metal_context.h"
 #include "cell_data.h"
 #include "config_parser.h"
+#include "../lib/pugixml/pugixml.hpp"
 #include "microenvironment.h"
 #include "cell_mechanics.h"
 #include "cell_phenotype.h"
@@ -236,6 +237,13 @@ int main(int argc, const char* argv[]) {
 
         // ─── Rules engine (ready for CSV rules files) ───
         PhysiCellMetal::RuleEngine ruleEngine;
+        pugi::xml_document doc;
+        if (doc.load_file(config_path)) {
+            pugi::xml_node xml_root = doc.child("PhysiCell_settings");
+            if (xml_root) {
+                ruleEngine.loadRulesFromConfig(xml_root);
+            }
+        }
 
         // ─── Simulation loop ───
         printf("\n[6/6] Starting simulation\n");
@@ -270,12 +278,13 @@ int main(int argc, const char* argv[]) {
                 double t0 = wallTime();
                 output.writeFrame(cells, current_time, output_frames);
 
-                // SVG output every 10th frame to avoid excessive I/O
-                if (output_frames % 10 == 0) {
-                    svgWriter.writeFrame(cells, current_time, output_frames,
-                                    config.output_folder,
-                                    config.x_min, config.x_max,
-                                    config.y_min, config.y_max);
+                // SVG output
+                svgWriter.writeFrame(cells, current_time, output_frames,
+                                config.output_folder,
+                                config.x_min, config.x_max,
+                                config.y_min, config.y_max);
+                if (output_frames == 0) {
+                    system(("cp " + config.output_folder + "/snapshot_000000.svg " + config.output_folder + "/initial.svg").c_str());
                 }
 
                 // MultiCellDS XML snapshot
@@ -285,6 +294,16 @@ int main(int argc, const char* argv[]) {
                                             microenv.getGridParams(), current_time,
                                             elapsed, output_frames,
                                             config.output_folder);
+                    
+                    writeMatlabSnapshots(cells, microenv.densityBuffer(),
+                                         microenv.getGridParams(), output_frames,
+                                         config.output_folder);
+                                         
+                    if (output_frames == 0) {
+                        system(("cp " + config.output_folder + "/output00000000.xml " + config.output_folder + "/initial.xml").c_str());
+                        system(("cp " + config.output_folder + "/output00000000_cells.mat " + config.output_folder + "/initial_cells.mat").c_str());
+                        system(("cp " + config.output_folder + "/output00000000_microenvironment0.mat " + config.output_folder + "/initial_microenvironment0.mat").c_str());
+                    }
                 }
                 t_output_total += wallTime() - t0;
 
@@ -384,9 +403,27 @@ int main(int argc, const char* argv[]) {
         // ─── Final output ───
         output.writeFrame(cells, current_time, output_frames);
         output.writeAllFrames();
+        
+        // Ensure final snapshots are written
+        svgWriter.writeFrame(cells, current_time, output_frames, config.output_folder, config.x_min, config.x_max, config.y_min, config.y_max);
+        writeMultiCellDSSnapshot(cells, microenv.densityBuffer(), microenv.getGridParams(), current_time, wallTime() - t_start, output_frames, config.output_folder);
+        writeMatlabSnapshots(cells, microenv.densityBuffer(), microenv.getGridParams(), output_frames, config.output_folder);
 
         // ─── Timing report ───
         double total_time = wallTime() - t_start;
+        printf("Total time: %.2f sec\n", total_time);
+
+        // Final files output
+        char final_frame[256];
+        snprintf(final_frame, sizeof(final_frame), "%08d", output_frames);
+        char final_frame_svg[256];
+        snprintf(final_frame_svg, sizeof(final_frame_svg), "%06d", output_frames);
+        system(("cp " + config.output_folder + "/snapshot_" + final_frame_svg + ".svg " + config.output_folder + "/final.svg").c_str());
+        system(("cp " + config.output_folder + "/output" + final_frame + ".xml " + config.output_folder + "/final.xml").c_str());
+        system(("cp " + config.output_folder + "/output" + final_frame + "_cells.mat " + config.output_folder + "/final_cells.mat").c_str());
+        system(("cp " + config.output_folder + "/output" + final_frame + "_microenvironment0.mat " + config.output_folder + "/final_microenvironment0.mat").c_str());
+
+        writeCellNeighborGraph(cells, config.output_folder);
 
         printf("\n══════════════════════════════════════════════════════════\n");
         printf("  SIMULATION COMPLETE\n");

@@ -75,9 +75,13 @@ struct CellTypeDefaults {
     bool  is_motile            = false;
     bool  restrict_to_2D       = true;
 
-    // ─── Secretion (per first substrate, simplified) ───
+    // ─── Secretion ───
     float secretion_rate       = 0.0f;
     float uptake_rate          = 10.0f;
+    std::vector<double> secretion_rates;
+    std::vector<double> uptake_rates;
+    std::vector<double> saturation_densities;
+    std::vector<double> net_export_rates;
 
     // ─── Oncoprotein distribution ───
     float oncoprotein_mean     = 1.0f;

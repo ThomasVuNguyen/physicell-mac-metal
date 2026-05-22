@@ -15,6 +15,7 @@ import glob
 import math
 import os
 import sys
+import struct
 
 try:
     import xml.etree.ElementTree as ET
@@ -68,6 +69,31 @@ def fmt(v, decimals=4):
             return str(v)
         return f"{v:.{decimals}f}"
     return str(v)
+
+
+def load_mat_header(path):
+    """Read a MATLAB v4 matrix header: returns {rows, cols, name, size}."""
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        raw = f.read(20)
+        if len(raw) != 20:
+            return None
+        _typ, rows, cols, _imag, name_len = struct.unpack("<5I", raw)
+        name = f.read(name_len).rstrip(b"\0").decode("latin1", "replace")
+    return {
+        "rows": rows,
+        "cols": cols,
+        "name": name,
+        "size": os.path.getsize(path),
+    }
+
+
+def count_nonempty_lines(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        return sum(1 for line in f if line.strip())
 
 # ---------------------------------------------------------------------------
 # Data loaders
@@ -240,7 +266,16 @@ def main():
     orig_frames = load_cells_3d(os.path.join(ORIGINAL_DIR, "cells_3d.json"))
 
     # ---- Load Metal data ---------------------------------------------------
+    metal_final_meta = load_xml_metadata(os.path.join(METAL_DIR, "final.xml"))
     metal_frames = load_metal_frames(METAL_DIR)
+    orig_cells_mat = load_mat_header(os.path.join(ORIGINAL_DIR, "initial_cells.mat"))
+    metal_cells_mat = load_mat_header(os.path.join(METAL_DIR, "initial_cells.mat"))
+    orig_final_cells_mat = load_mat_header(os.path.join(ORIGINAL_DIR, "final_cells.mat"))
+    metal_final_cells_mat = load_mat_header(os.path.join(METAL_DIR, "final_cells.mat"))
+    orig_micro_mat = load_mat_header(os.path.join(ORIGINAL_DIR, "final_microenvironment0.mat"))
+    metal_micro_mat = load_mat_header(os.path.join(METAL_DIR, "final_microenvironment0.mat"))
+    orig_neighbor_edges = count_nonempty_lines(os.path.join(ORIGINAL_DIR, "final_cell_neighbor_graph.txt"))
+    metal_neighbor_edges = count_nonempty_lines(os.path.join(METAL_DIR, "final_cell_neighbor_graph.txt"))
 
     # ======================================================================
     # A. FUNCTIONALITY CHECK
@@ -262,26 +297,34 @@ def main():
          True),  # Implied by positions not collapsing
         ("Motility",
          orig_final_meta is not None and "is_motile" in (orig_final_meta.get("labels", [])),
-         False),  # No motility fields in Metal JSON
+         metal_final_meta is not None and "is_motile" in (metal_final_meta.get("labels", []))),
         ("Substrate diffusion / decay",
          any("microenvironment" in (m.get("mat_file", "") if m else "")
              for m in [orig_final_meta]) if orig_final_meta else False,
-         False),  # No substrate data in Metal JSON
+         os.path.isfile(os.path.join(METAL_DIR, "final_microenvironment0.mat"))),
         ("Secretion / uptake",
          orig_final_meta is not None and "secretion_rates" in (orig_final_meta.get("labels", [])),
-         False),
+         metal_final_meta is not None and "secretion_rates" in (metal_final_meta.get("labels", []))),
         ("Custom data (oncoprotein)",
          orig_frames is not None and "oncoprotein" in (orig_frames[0]["cells"][0] if orig_frames else {}),
          "oncoprotein" in (metal_frames[0]["cells"][0] if metal_frames else {})),
         ("Neighbor graphs",
          os.path.isfile(os.path.join(ORIGINAL_DIR, "final_cell_neighbor_graph.txt")),
-         False),  # No graph output in Metal
+         metal_neighbor_edges is not None and metal_neighbor_edges > 0),
         ("SVG output",
          os.path.isfile(os.path.join(ORIGINAL_DIR, "final.svg")),
-         False),
+         os.path.isfile(os.path.join(METAL_DIR, "final.svg"))),
         (".mat output",
          os.path.isfile(os.path.join(ORIGINAL_DIR, "final_cells.mat")),
-         False),  # Metal uses JSON
+         metal_cells_mat is not None and orig_cells_mat is not None
+         and metal_cells_mat["rows"] == orig_cells_mat["rows"]
+         and metal_cells_mat["name"] == orig_cells_mat["name"]
+         and metal_final_cells_mat is not None and orig_final_cells_mat is not None
+         and metal_final_cells_mat["rows"] == orig_final_cells_mat["rows"]
+         and metal_final_cells_mat["name"] == orig_final_cells_mat["name"]
+         and metal_micro_mat is not None and orig_micro_mat is not None
+         and metal_micro_mat["rows"] == orig_micro_mat["rows"]
+         and metal_micro_mat["name"] == orig_micro_mat["name"]),
         ("Rules / signals",
          False,  # Not in default sample
          False),
@@ -508,8 +551,8 @@ def main():
               f"PhysiCell default={fmt(PHYSICELL_DEFAULT_RADIUS)}")
 
         # Close to PhysiCell default?
-        close = abs(r_mean - PHYSICELL_DEFAULT_RADIUS) / PHYSICELL_DEFAULT_RADIUS < 0.15
-        check("Mean radius within 15% of PhysiCell default (8.413 µm)",
+        close = abs(r_mean - PHYSICELL_DEFAULT_RADIUS) / PHYSICELL_DEFAULT_RADIUS < 0.05
+        check("Mean radius within 5% of PhysiCell default (8.413 µm)",
               close,
               f"Deviation: {abs(r_mean - PHYSICELL_DEFAULT_RADIUS) / PHYSICELL_DEFAULT_RADIUS * 100:.1f}%")
 
@@ -547,8 +590,8 @@ def main():
         if orig_end_c and metal_end_c:
             orig_ratio = orig_end_c / orig_start_c if orig_start_c else 0
             metal_ratio = metal_end_c / metal_start_c if metal_start_c else 0
-            similar = (0.2 < metal_ratio / orig_ratio < 5.0) if orig_ratio > 0 else False
-            check("Growth rate qualitatively similar (within 5x)",
+            similar = (0.90 < metal_ratio / orig_ratio < 1.10) if orig_ratio > 0 else False
+            check("Growth rate matched (within 10%)",
                   similar,
                   f"Original growth ratio: {orig_ratio:.2f}x, "
                   f"Metal growth ratio: {metal_ratio:.2f}x "
@@ -559,8 +602,8 @@ def main():
         oc0 = orig_frames[0]["num_cells"]
         mc0 = metal_frames[0]["num_cells"]
         diff_pct = abs(mc0 - oc0) / oc0 * 100 if oc0 > 0 else 0
-        check("Initial cell counts comparable",
-              diff_pct < 50,
+        check("Initial cell counts matched (within 1%)",
+              diff_pct < 1.0,
               f"Original: {oc0}, Metal: {mc0} (Δ={diff_pct:.1f}%)")
 
     # 6. Oncoprotein values reasonable
@@ -610,6 +653,34 @@ def main():
         check("Spatial coherence (>50% cells within 500µm of origin)",
               within_500 > 50,
               f"{within_500:.1f}% of cells within 500µm radius")
+
+    # 11. MATLAB schema compatibility
+    if orig_cells_mat and metal_cells_mat:
+        check("Initial cell .mat row schema matches PhysiCell",
+              metal_cells_mat["rows"] == orig_cells_mat["rows"]
+              and metal_cells_mat["name"] == orig_cells_mat["name"],
+              f"Original rows/name: {orig_cells_mat['rows']}/{orig_cells_mat['name']}; "
+              f"Metal rows/name: {metal_cells_mat['rows']}/{metal_cells_mat['name']}")
+
+    if orig_final_cells_mat and metal_final_cells_mat:
+        check("Final cell .mat row schema matches PhysiCell",
+              metal_final_cells_mat["rows"] == orig_final_cells_mat["rows"]
+              and metal_final_cells_mat["name"] == orig_final_cells_mat["name"],
+              f"Original rows/name: {orig_final_cells_mat['rows']}/{orig_final_cells_mat['name']}; "
+              f"Metal rows/name: {metal_final_cells_mat['rows']}/{metal_final_cells_mat['name']}")
+
+    if orig_micro_mat and metal_micro_mat:
+        check("Microenvironment .mat schema matches PhysiCell",
+              metal_micro_mat["rows"] == orig_micro_mat["rows"]
+              and metal_micro_mat["name"] == orig_micro_mat["name"],
+              f"Original rows/name: {orig_micro_mat['rows']}/{orig_micro_mat['name']}; "
+              f"Metal rows/name: {metal_micro_mat['rows']}/{metal_micro_mat['name']}")
+
+    # 12. Neighbor graph is semantically present, not just touched
+    if orig_neighbor_edges is not None and metal_neighbor_edges is not None:
+        check("Neighbor graph has non-empty edge set",
+              metal_neighbor_edges > 0,
+              f"Original edges: {orig_neighbor_edges}; Metal edges: {metal_neighbor_edges}")
 
     # ---- Summary -----------------------------------------------------------
     header("SUMMARY")

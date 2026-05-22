@@ -14,7 +14,7 @@
 //   [2m+1]             volume
 //   [2m+2]             contact with live cells
 //   [2m+3]             contact with dead cells
-//   [2m+4]             damage (placeholder, always 0 for now)
+//   [2m+4]             damage
 //   [2m+5]             dead (0 or 1)
 //   [2m+6]             time
 //   [2m+7]             custom:oncoprotein

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cmath>
 #include <string>
+#include <algorithm>
 
 // ─── Helper: safe float parse with default ───
 static float getFloat(const pugi::xml_node& node, float def = 0.0f) {
@@ -41,6 +42,21 @@ static std::string getString(const pugi::xml_node& node, const char* def = "") {
     const char* text = node.child_value();
     if (!text) return def;
     return text;
+}
+
+static int substrateIndexByNameOrId(const std::vector<SubstrateConfig>& substrates,
+                                    const char* name, int fallback_id) {
+    if (name && name[0] != '\0') {
+        for (size_t i = 0; i < substrates.size(); i++) {
+            if (substrates[i].name == name) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    if (fallback_id >= 0 && fallback_id < static_cast<int>(substrates.size())) {
+        return fallback_id;
+    }
+    return -1;
 }
 
 // ─── Main parse function ─────────────────────────────────────────────
@@ -362,13 +378,39 @@ SimConfig parseConfig(const char* xml_path) {
                 }
             }
 
-            // ── Secretion (first substrate only for simplified model) ──
+            // ── Secretion ──
             {
+                size_t nsubs = config.substrates.size();
+                ct.secretion_rates.assign(nsubs, 0.0);
+                ct.uptake_rates.assign(nsubs, 0.0);
+                ct.saturation_densities.assign(nsubs, 1.0);
+                ct.net_export_rates.assign(nsubs, 0.0);
+
                 pugi::xml_node sec = phenotype.child("secretion");
-                pugi::xml_node sub = sec.child("substrate");
-                if (sub) {
-                    ct.secretion_rate = getFloat(sub.child("secretion_rate"), 0.0f);
-                    ct.uptake_rate    = getFloat(sub.child("uptake_rate"), 10.0f);
+                for (pugi::xml_node sub = sec.child("substrate"); sub;
+                     sub = sub.next_sibling("substrate"))
+                {
+                    int sid = substrateIndexByNameOrId(
+                        config.substrates,
+                        sub.attribute("name").as_string(""),
+                        sub.attribute("ID").as_int(-1));
+                    if (sid < 0) {
+                        continue;
+                    }
+
+                    ct.secretion_rates[static_cast<size_t>(sid)] =
+                        getFloat(sub.child("secretion_rate"), 0.0f);
+                    ct.saturation_densities[static_cast<size_t>(sid)] =
+                        getFloat(sub.child("secretion_target"), 1.0f);
+                    ct.uptake_rates[static_cast<size_t>(sid)] =
+                        getFloat(sub.child("uptake_rate"), 0.0f);
+                    ct.net_export_rates[static_cast<size_t>(sid)] =
+                        getFloat(sub.child("net_export_rate"), 0.0f);
+                }
+
+                if (!ct.secretion_rates.empty()) {
+                    ct.secretion_rate = static_cast<float>(ct.secretion_rates[0]);
+                    ct.uptake_rate = static_cast<float>(ct.uptake_rates[0]);
                 }
             }
 

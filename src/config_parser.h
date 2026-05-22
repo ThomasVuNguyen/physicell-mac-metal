@@ -86,9 +86,14 @@ struct CellTypeConfig {
     int chemotaxis_direction = 1;
     std::vector<double> chemotactic_sensitivities;  // per-substrate, parsed from XML
 
-    // Secretion (per first substrate, simplified)
+    // Secretion defaults. Scalar fields are kept for legacy single-substrate
+    // callers; vectors are indexed by substrate ID.
     float secretion_rate = 0.0f;
     float uptake_rate = 10.0f;
+    std::vector<double> secretion_rates;
+    std::vector<double> uptake_rates;
+    std::vector<double> saturation_densities;
+    std::vector<double> net_export_rates;
 
     // ─── Cell Interactions ───
     // Per-target-type rates (indexed by target cell type ID)

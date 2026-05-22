@@ -134,6 +134,7 @@ void ingestCell(CellData& cells, uint32_t eater, uint32_t target) {
             size_t off = static_cast<size_t>(target) * cells.n_substrates + s;
             cells.secretion_rate[off] = 0.0;
             cells.uptake_rate[off]    = 0.0;
+            if (cells.net_export_rate) cells.net_export_rate[off] = 0.0;
         }
     }
 

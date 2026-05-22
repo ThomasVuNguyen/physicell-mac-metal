@@ -47,4 +47,12 @@ void writeMultiCellDSSnapshot(const CellData& cells, const float* density,
                               double elapsed_sec, int frame_index,
                               const std::string& output_folder);
 
+/// Write PhysiCell/BioFVM compatible .mat snapshots for cells and microenvironment
+void writeMatlabSnapshots(const CellData& cells, const float* density,
+                          const GridParams& grid, int frame_index,
+                          const std::string& output_folder);
+
+/// Write cell neighbor graph output to final_cell_neighbor_graph.txt
+void writeCellNeighborGraph(const CellData& cells, const std::string& output_folder);
+
 #endif // PHYSICELL_OUTPUT_WRITER_H

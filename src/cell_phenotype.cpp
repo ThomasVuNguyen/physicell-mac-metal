@@ -533,25 +533,28 @@ void processSecretion(CellData& cells, float* density,
                      static_cast<double>(grid.dz);
     double internal_constant = dt * V_cell / V_voxel;
 
-    // Currently: secretion_rate and uptake_rate are stored per-cell
-    // (single substrate). Access by cell index i.
-    // TODO: extend to multi-substrate with per-cell×per-substrate arrays.
-    double sec_rate = cells.secretion_rate[i];
-    double upt_rate = cells.uptake_rate[i];
+    for (uint32_t s = 0; s < grid.n_substrates; s++) {
+        size_t off = static_cast<size_t>(i) * grid.n_substrates + s;
+        double sec_rate    = cells.secretion_rate[off];
+        double upt_rate    = cells.uptake_rate[off];
+        double sat_density = cells.saturation_density[off];
+        double net_export  = cells.net_export_rate[off];
 
-    // Density for substrate 0 at this voxel
-    double rho = static_cast<double>(density[vi]);
+        size_t voxel_off = s * total_voxels + vi;
+        double rho = static_cast<double>(density[voxel_off]);
 
-    // Saturation density = 1.0 (simplified; could be per-substrate)
-    double sat_density = 1.0;
+        // Net export (PhysiCell adds it simply; typically scaled by V_cell/V_voxel or similar)
+        // From PhysiCell (implicit): rho += dt * net_export / V_voxel
+        rho += dt * net_export / V_voxel;
 
-    // Implicit volume-scaled solve (PhysiCell BioFVM formula)
-    double temp1 = internal_constant * sec_rate * sat_density;
-    double temp2 = 1.0 + internal_constant * (sec_rate + upt_rate);
-    rho = (rho + temp1) / temp2;
-    if (rho < 0.0) rho = 0.0;
+        // Implicit volume-scaled solve
+        double temp1 = internal_constant * sec_rate * sat_density;
+        double temp2 = 1.0 + internal_constant * (sec_rate + upt_rate);
+        rho = (rho + temp1) / temp2;
+        if (rho < 0.0) rho = 0.0;
 
-    density[vi] = static_cast<float>(rho);
+        density[voxel_off] = static_cast<float>(rho);
+    }
 }
 
 // ─── Cell division ───────────────────────────────────────────────────
@@ -685,8 +688,10 @@ uint32_t divideCell(CellData& cells, uint32_t parent) {
         for (uint32_t s = 0; s < cells.n_substrates; s++) {
             size_t p_off = static_cast<size_t>(parent)   * cells.n_substrates + s;
             size_t d_off = static_cast<size_t>(daughter)  * cells.n_substrates + s;
-            cells.secretion_rate[d_off] = cells.secretion_rate[p_off];
-            cells.uptake_rate[d_off]    = cells.uptake_rate[p_off];
+            cells.secretion_rate[d_off]     = cells.secretion_rate[p_off];
+            cells.uptake_rate[d_off]        = cells.uptake_rate[p_off];
+            cells.saturation_density[d_off] = cells.saturation_density[p_off];
+            cells.net_export_rate[d_off]    = cells.net_export_rate[p_off];
         }
     }
 

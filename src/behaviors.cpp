@@ -25,6 +25,8 @@ static int n_substrates_cached = 0;
 // Offsets into the behavior index space (computed at init)
 static int off_secretion = 0;
 static int off_uptake = 0;
+static int off_saturation = 0;
+static int off_net_export = 0;
 static int off_cycle_entry = 0;
 static int off_apoptosis = 0;
 static int off_necrosis = 0;
@@ -59,6 +61,26 @@ void initBehaviorDictionary(int n_substrates,
     for (int i = 0; i < n_substrates; i++) {
         std::string name = substrate_names[i] + " uptake";
         behavior_to_int[name] = idx;
+        int_to_behavior[idx] = name;
+        idx++;
+    }
+
+    // secretion target / saturation densities
+    off_saturation = idx;
+    for (int i = 0; i < n_substrates; i++) {
+        std::string name = substrate_names[i] + " secretion target";
+        behavior_to_int[name] = idx;
+        behavior_to_int[substrate_names[i] + " saturation density"] = idx;
+        int_to_behavior[idx] = name;
+        idx++;
+    }
+
+    // net export rates
+    off_net_export = idx;
+    for (int i = 0; i < n_substrates; i++) {
+        std::string name = substrate_names[i] + " net export";
+        behavior_to_int[name] = idx;
+        behavior_to_int[substrate_names[i] + " net export rate"] = idx;
         int_to_behavior[idx] = name;
         idx++;
     }
@@ -183,6 +205,26 @@ void setBehavior(CellData& cells, uint32_t cell_idx,
         return;
     }
 
+    // Secretion target / saturation density
+    if (behavior_id >= off_saturation && behavior_id < off_saturation + m) {
+        int s = behavior_id - off_saturation;
+        if (cells.saturation_density) {
+            size_t offset = static_cast<size_t>(cell_idx) * cells.n_substrates + s;
+            cells.saturation_density[offset] = value;
+        }
+        return;
+    }
+
+    // Net export rate
+    if (behavior_id >= off_net_export && behavior_id < off_net_export + m) {
+        int s = behavior_id - off_net_export;
+        if (cells.net_export_rate) {
+            size_t offset = static_cast<size_t>(cell_idx) * cells.n_substrates + s;
+            cells.net_export_rate[offset] = value;
+        }
+        return;
+    }
+
     // Cycle entry rate
     if (behavior_id == off_cycle_entry) {
         cells.transition_rate_01[cell_idx] = value;
@@ -264,6 +306,26 @@ double getBehavior(const CellData& cells, uint32_t cell_idx,
         return 0.0;
     }
 
+    // Secretion target / saturation density
+    if (behavior_id >= off_saturation && behavior_id < off_saturation + m) {
+        int s = behavior_id - off_saturation;
+        if (cells.saturation_density) {
+            size_t offset = static_cast<size_t>(cell_idx) * cells.n_substrates + s;
+            return cells.saturation_density[offset];
+        }
+        return 0.0;
+    }
+
+    // Net export rate
+    if (behavior_id >= off_net_export && behavior_id < off_net_export + m) {
+        int s = behavior_id - off_net_export;
+        if (cells.net_export_rate) {
+            size_t offset = static_cast<size_t>(cell_idx) * cells.n_substrates + s;
+            return cells.net_export_rate[offset];
+        }
+        return 0.0;
+    }
+
     // Cycle entry rate
     if (behavior_id == off_cycle_entry) {
         return cells.transition_rate_01[cell_idx];
@@ -320,16 +382,36 @@ double getBaseBehavior(const CellTypeRegistry& registry,
 
     int m = n_substrates_cached;
 
-    // Secretion rate (base from cell type defaults — only first substrate)
+    // Secretion rate
     if (behavior_id >= off_secretion && behavior_id < off_secretion + m) {
         int s = behavior_id - off_secretion;
-        return (s == 0) ? static_cast<double>(def.secretion_rate) : 0.0;
+        return (s < static_cast<int>(def.secretion_rates.size()))
+            ? def.secretion_rates[static_cast<size_t>(s)]
+            : ((s == 0) ? static_cast<double>(def.secretion_rate) : 0.0);
     }
 
-    // Uptake rate (base from cell type defaults — only first substrate)
+    // Uptake rate
     if (behavior_id >= off_uptake && behavior_id < off_uptake + m) {
         int s = behavior_id - off_uptake;
-        return (s == 0) ? static_cast<double>(def.uptake_rate) : 0.0;
+        return (s < static_cast<int>(def.uptake_rates.size()))
+            ? def.uptake_rates[static_cast<size_t>(s)]
+            : ((s == 0) ? static_cast<double>(def.uptake_rate) : 0.0);
+    }
+
+    // Secretion target / saturation density
+    if (behavior_id >= off_saturation && behavior_id < off_saturation + m) {
+        int s = behavior_id - off_saturation;
+        return (s < static_cast<int>(def.saturation_densities.size()))
+            ? def.saturation_densities[static_cast<size_t>(s)]
+            : 1.0;
+    }
+
+    // Net export rate
+    if (behavior_id >= off_net_export && behavior_id < off_net_export + m) {
+        int s = behavior_id - off_net_export;
+        return (s < static_cast<int>(def.net_export_rates.size()))
+            ? def.net_export_rates[static_cast<size_t>(s)]
+            : 0.0;
     }
 
     if (behavior_id == off_cycle_entry) {

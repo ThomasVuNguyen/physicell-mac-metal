@@ -84,6 +84,7 @@ CellData::CellData(uint32_t max_cells)
 
     // Per-substrate
     secretion_rate = uptake_rate = nullptr;
+    saturation_density = net_export_rate = nullptr;
 
     // Custom data
     custom_data = nullptr;
@@ -360,6 +361,8 @@ void CellData::freeCPUBuffers() {
     if (substrate_buffers_owned_) {
         free(secretion_rate); secretion_rate = nullptr;
         free(uptake_rate);    uptake_rate = nullptr;
+        free(saturation_density); saturation_density = nullptr;
+        free(net_export_rate);    net_export_rate = nullptr;
         substrate_buffers_owned_ = false;
     }
 
@@ -373,11 +376,15 @@ void CellData::allocateSubstrateBuffers(uint32_t nsubs) {
     if (substrate_buffers_owned_) {
         free(secretion_rate);
         free(uptake_rate);
+        free(saturation_density);
+        free(net_export_rate);
     }
     n_substrates = nsubs;
     size_t total = static_cast<size_t>(max_cells) * nsubs;
-    secretion_rate = static_cast<double*>(calloc(total, sizeof(double)));
-    uptake_rate    = static_cast<double*>(calloc(total, sizeof(double)));
+    secretion_rate     = static_cast<double*>(calloc(total, sizeof(double)));
+    uptake_rate        = static_cast<double*>(calloc(total, sizeof(double)));
+    saturation_density = static_cast<double*>(calloc(total, sizeof(double)));
+    net_export_rate    = static_cast<double*>(calloc(total, sizeof(double)));
     substrate_buffers_owned_ = true;
 }
 
@@ -508,8 +515,10 @@ void CellData::removeCell(uint32_t index) {
             for (uint32_t s = 0; s < n_substrates; s++) {
                 size_t off_i = static_cast<size_t>(index) * n_substrates + s;
                 size_t off_l = static_cast<size_t>(last)  * n_substrates + s;
-                secretion_rate[off_i] = secretion_rate[off_l];
-                uptake_rate[off_i]    = uptake_rate[off_l];
+                secretion_rate[off_i]     = secretion_rate[off_l];
+                uptake_rate[off_i]        = uptake_rate[off_l];
+                saturation_density[off_i] = saturation_density[off_l];
+                net_export_rate[off_i]    = net_export_rate[off_l];
             }
         }
         // Custom data arrays
@@ -652,8 +661,10 @@ void CellData::setDefaults(uint32_t index) {
     if (secretion_rate && n_substrates > 0) {
         for (uint32_t s = 0; s < n_substrates; s++) {
             size_t off = static_cast<size_t>(index) * n_substrates + s;
-            secretion_rate[off] = 0.0;
-            uptake_rate[off]    = 10.0;
+            secretion_rate[off]     = 0.0;
+            uptake_rate[off]        = 10.0;
+            saturation_density[off] = 1.0;
+            net_export_rate[off]    = 0.0;
         }
     }
 

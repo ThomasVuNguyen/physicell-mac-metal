@@ -160,19 +160,53 @@ double getSignal(const CellData& cells, uint32_t cell_idx,
 
     // ── Substrate gradient magnitude [m .. 2m-1] ──
     if (signal_id < 2 * m) {
-        // Gradient signals require gradient computation which we don't
-        // have on CPU in this architecture. Return 0 as placeholder.
-        // In PhysiCell, gradients are precomputed by BioFVM.
-        return 0.0;
+        if (!density) return 0.0;
+        uint32_t nx = grid.nx;
+        uint32_t ny = grid.ny;
+        uint32_t nz = grid.nz > 0 ? grid.nz : 1;
+        uint32_t total_voxels = nx * ny * nz;
+        uint32_t vi = cells.voxel_index[cell_idx];
+        if (vi >= total_voxels || nx == 0 || ny == 0) return 0.0;
+
+        uint32_t substrate = static_cast<uint32_t>(signal_id - m);
+        size_t base = static_cast<size_t>(substrate) * total_voxels;
+        uint32_t ix = vi % nx;
+        uint32_t iy = (vi / nx) % ny;
+        uint32_t iz = vi / (nx * ny);
+
+        auto valueAt = [&](uint32_t x, uint32_t y, uint32_t z) -> double {
+            size_t idx = base + static_cast<size_t>(z) * nx * ny
+                       + static_cast<size_t>(y) * nx + x;
+            return static_cast<double>(density[idx]);
+        };
+
+        double gx = 0.0, gy = 0.0, gz = 0.0;
+        if (nx > 1) {
+            if (ix == 0) gx = (valueAt(ix + 1, iy, iz) - valueAt(ix, iy, iz)) / grid.dx;
+            else if (ix + 1 == nx) gx = (valueAt(ix, iy, iz) - valueAt(ix - 1, iy, iz)) / grid.dx;
+            else gx = (valueAt(ix + 1, iy, iz) - valueAt(ix - 1, iy, iz)) / (2.0 * grid.dx);
+        }
+        if (ny > 1) {
+            if (iy == 0) gy = (valueAt(ix, iy + 1, iz) - valueAt(ix, iy, iz)) / grid.dy;
+            else if (iy + 1 == ny) gy = (valueAt(ix, iy, iz) - valueAt(ix, iy - 1, iz)) / grid.dy;
+            else gy = (valueAt(ix, iy + 1, iz) - valueAt(ix, iy - 1, iz)) / (2.0 * grid.dy);
+        }
+        if (nz > 1) {
+            if (iz == 0) gz = (valueAt(ix, iy, iz + 1) - valueAt(ix, iy, iz)) / grid.dz;
+            else if (iz + 1 == nz) gz = (valueAt(ix, iy, iz) - valueAt(ix, iy, iz - 1)) / grid.dz;
+            else gz = (valueAt(ix, iy, iz + 1) - valueAt(ix, iy, iz - 1)) / (2.0 * grid.dz);
+        }
+        return std::sqrt(gx * gx + gy * gy + gz * gz);
     }
 
     int base_idx = 2 * m;
 
     // ── Pressure ──
     if (signal_id == base_idx) {
-        // Simple pressure: not stored per-cell in our SoA yet.
-        // PhysiCell uses simple_pressure = number_of_attached_cells / reference.
-        // Return 0 as placeholder; can be wired up when contact data is available.
+        // Simple pressure: from mechanics
+        if (cells.simple_pressure) {
+            return static_cast<double>(cells.simple_pressure[cell_idx]);
+        }
         return 0.0;
     }
 
@@ -183,19 +217,50 @@ double getSignal(const CellData& cells, uint32_t cell_idx,
 
     // ── Contact with live cells ──
     if (signal_id == base_idx + 2) {
-        // Contact counting requires neighbor lists from spatial hash.
-        // Return 0 as placeholder; wired up when mechanics provides neighbor data.
-        return 0.0;
+        double count = 0.0;
+        for (uint32_t j = 0; j < cells.num_cells; j++) {
+            if (j == cell_idx || cells.total_volume[j] <= 1e-15f) continue;
+            if (cells.is_alive && cells.is_alive[j] == 0) continue;
+            double dx = cells.position_x[j] - cells.position_x[cell_idx];
+            double dy = cells.position_y[j] - cells.position_y[cell_idx];
+            double dz = cells.position_z[j] - cells.position_z[cell_idx];
+            double rsum = cells.radius[j] + cells.radius[cell_idx];
+            double scale = cells.relative_max_adhesion_distance
+                ? cells.relative_max_adhesion_distance[cell_idx] : 1.25;
+            double max_dist = scale * rsum;
+            if (dx * dx + dy * dy + dz * dz <= max_dist * max_dist) {
+                count += 1.0;
+            }
+        }
+        return count;
     }
 
     // ── Contact with dead cells ──
     if (signal_id == base_idx + 3) {
-        return 0.0;  // placeholder
+        double count = 0.0;
+        for (uint32_t j = 0; j < cells.num_cells; j++) {
+            if (j == cell_idx || cells.total_volume[j] <= 1e-15f) continue;
+            if (!cells.is_alive || cells.is_alive[j] != 0) continue;
+            double dx = cells.position_x[j] - cells.position_x[cell_idx];
+            double dy = cells.position_y[j] - cells.position_y[cell_idx];
+            double dz = cells.position_z[j] - cells.position_z[cell_idx];
+            double rsum = cells.radius[j] + cells.radius[cell_idx];
+            double scale = cells.relative_max_adhesion_distance
+                ? cells.relative_max_adhesion_distance[cell_idx] : 1.25;
+            double max_dist = scale * rsum;
+            if (dx * dx + dy * dy + dz * dz <= max_dist * max_dist) {
+                count += 1.0;
+            }
+        }
+        return count;
     }
 
     // ── Damage ──
     if (signal_id == base_idx + 4) {
-        return 0.0;  // placeholder — no damage field in our SoA yet
+        if (cells.damage) {
+            return cells.damage[cell_idx];
+        }
+        return 0.0;
     }
 
     // ── Dead state ──

@@ -209,8 +209,20 @@ void CellTypeRegistry::applyDefaults(CellData& cells, uint32_t index,
     if (cells.secretion_rate && cells.n_substrates > 0) {
         for (uint32_t s = 0; s < cells.n_substrates; s++) {
             size_t off = static_cast<size_t>(index) * cells.n_substrates + s;
-            cells.secretion_rate[off] = 0.0;  // default off
-            cells.uptake_rate[off]    = static_cast<double>(def.uptake_rate);
+            cells.secretion_rate[off] =
+                (s < def.secretion_rates.size()) ? def.secretion_rates[s]
+                                                 : ((s == 0) ? def.secretion_rate : 0.0);
+            cells.uptake_rate[off] =
+                (s < def.uptake_rates.size()) ? def.uptake_rates[s]
+                                              : ((s == 0) ? def.uptake_rate : 0.0);
+            if (cells.saturation_density) {
+                cells.saturation_density[off] =
+                    (s < def.saturation_densities.size()) ? def.saturation_densities[s] : 1.0;
+            }
+            if (cells.net_export_rate) {
+                cells.net_export_rate[off] =
+                    (s < def.net_export_rates.size()) ? def.net_export_rates[s] : 0.0;
+            }
         }
     }
 }
@@ -335,6 +347,10 @@ void CellTypeRegistry::buildFromConfig(const std::vector<CellTypeConfig>& config
         // Secretion
         def.secretion_rate = cfg.secretion_rate;
         def.uptake_rate    = cfg.uptake_rate;
+        def.secretion_rates = cfg.secretion_rates;
+        def.uptake_rates = cfg.uptake_rates;
+        def.saturation_densities = cfg.saturation_densities;
+        def.net_export_rates = cfg.net_export_rates;
 
         // Oncoprotein distribution
         def.oncoprotein_mean = cfg.oncoprotein_mean;
