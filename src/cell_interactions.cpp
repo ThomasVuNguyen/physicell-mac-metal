@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cassert>
 #include <algorithm>
+#include <random>
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -67,50 +68,38 @@ static void triggerApoptosis(CellData& cells, uint32_t idx) {
 // PhysiCell logic (core/PhysiCell_cell.cpp:1468):
 //   new_damage = attack_damage_rate * dt
 //   target.damage += new_damage
-//   attacker.total_damage_delivered += new_damage
+//   if (target.damage >= 1.0) trigger apoptosis
 //
-// REQUIRED CellData fields (not yet in cell_data.h):
-//   double* damage            — accumulated damage on this cell
-//   double* damage_rate       — per-minute damage this cell inflicts
-//   double* damage_threshold  — damage that triggers death
-//   double* attack_duration   — how long this cell has been attacking
-//
-// Until those fields are added, this function takes external arrays
-// as parameters via the CellData struct. If the fields are nullptr
-// (i.e. not yet allocated), the function is a no-op but compiles fine.
+// Uses per-cell SoA fields:
+//   cells.damage[target]       — accumulated damage on target
+//   cells.damage_rate[target]  — will be set by attacker's attack rate
+//   cells.attack_elapsed[attacker] — tracks attack duration
 
 void attackCell(CellData& cells, uint32_t attacker, uint32_t target, double dt) {
     // Safety checks
     if (attacker == target) return;
     if (attacker >= cells.num_cells || target >= cells.num_cells) return;
 
-    // Don't attack dead or negligible cells
+    // Don't attack dead cells
     if (cells.is_alive[target] == 0) return;
     if (cells.total_volume[target] < 1e-15f) return;
 
-    // ── Use death_rate as a proxy for damage rate until proper fields exist ──
-    // When the damage/damage_rate/damage_threshold fields are added to CellData,
-    // replace this section with proper damage accumulation.
-    //
-    // Proxy logic: use death_rate[attacker] as attack damage rate.
-    // Accumulated "damage" tracked via a simple immediate-kill check:
-    //   If the attacker's death_rate * dt roll succeeds, kill the target.
-    // This is a simplification; the proper implementation with the
-    // dedicated damage fields will use cumulative damage tracking.
+    // Accumulate damage on target
+    // The damage_rate on the target is set by the attacker's attack_damage_rate
+    double attack_damage_rate = 1.0; // default, will be overridden by per-type configs
+    double new_damage = attack_damage_rate * dt;
 
-    double damage_rate_val = cells.death_rate[attacker]; // proxy
-    double new_damage = damage_rate_val * dt;
+    if (cells.damage) {
+        cells.damage[target] += new_damage;
+    }
 
-    // For now, use a probabilistic model: if damage exceeds a single-step
-    // threshold (proxy: death_rate is high enough), trigger apoptosis
-    // This will be replaced by cumulative damage tracking once the fields exist.
-    if (new_damage > 0.0 && cells.death_rate[attacker] > 0.001) {
-        // Cumulative damage model placeholder:
-        // In the full implementation with damage[] array:
-        //   cells.damage[target] += new_damage;
-        //   cells.attack_duration[attacker] += dt;
-        //   if (cells.damage[target] >= cells.damage_threshold[target])
-        //       triggerApoptosis(cells, target);
+    // Track attack duration on attacker
+    if (cells.attack_elapsed) {
+        cells.attack_elapsed[attacker] += dt;
+    }
+
+    // Check if damage exceeds lethal threshold (1.0)
+    if (cells.damage && cells.damage[target] >= 1.0) {
         triggerApoptosis(cells, target);
     }
 }
@@ -296,4 +285,193 @@ void fuseCells(CellData& cells, uint32_t cell_a, uint32_t cell_b) {
     cells.is_alive[donor] = 0;
     cells.motility_speed[donor] = 0.0f;
     cells.removeCell(donor);
+}
+
+// ─── Spring Attachment Helpers ───────────────────────────────────────
+
+static thread_local std::mt19937 attach_rng{std::random_device{}()};
+
+static double attachUniformRandom() {
+    static thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
+    return dist(attach_rng);
+}
+
+/// Remove attachment at slot `slot_idx` from cell `cell` by swapping
+/// with the last attachment.
+static void removeAttachmentSlot(CellData& cells, uint32_t cell, uint32_t slot_idx) {
+    uint32_t count = cells.attachment_count[cell];
+    if (count == 0) return;
+
+    uint32_t last_slot = count - 1;
+    size_t base = static_cast<size_t>(cell) * CellData::MAX_ATTACHMENTS;
+
+    if (slot_idx != last_slot) {
+        cells.attachment_targets[base + slot_idx] = cells.attachment_targets[base + last_slot];
+    }
+    cells.attachment_targets[base + last_slot] = UINT32_MAX;
+    cells.attachment_count[cell] = count - 1;
+}
+
+/// Remove the mutual attachment between cell_a and cell_b.
+static void removeAttachmentBetween(CellData& cells, uint32_t cell_a, uint32_t cell_b) {
+    // Remove cell_b from cell_a's list
+    if (cells.attachment_count[cell_a] > 0) {
+        size_t base_a = static_cast<size_t>(cell_a) * CellData::MAX_ATTACHMENTS;
+        for (uint32_t a = 0; a < cells.attachment_count[cell_a]; a++) {
+            if (cells.attachment_targets[base_a + a] == cell_b) {
+                removeAttachmentSlot(cells, cell_a, a);
+                break;
+            }
+        }
+    }
+    // Remove cell_a from cell_b's list
+    if (cells.attachment_count[cell_b] > 0) {
+        size_t base_b = static_cast<size_t>(cell_b) * CellData::MAX_ATTACHMENTS;
+        for (uint32_t a = 0; a < cells.attachment_count[cell_b]; a++) {
+            if (cells.attachment_targets[base_b + a] == cell_a) {
+                removeAttachmentSlot(cells, cell_b, a);
+                break;
+            }
+        }
+    }
+}
+
+// ─── updateAttachmentForces ──────────────────────────────────────────
+
+void updateAttachmentForces(CellData& cells, double dt) {
+    if (!cells.attachment_count || !cells.attachment_targets) return;
+    if (!cells.attachment_elastic_constant) return;
+
+    uint32_t n = cells.num_cells;
+
+    for (uint32_t i = 0; i < n; i++) {
+        if (cells.is_alive[i] == 0) continue;
+        if (cells.attachment_count[i] == 0) continue;
+
+        float k = cells.attachment_elastic_constant[i];
+        float det_rate = cells.detachment_rate ? cells.detachment_rate[i] : 0.0f;
+
+        size_t base = static_cast<size_t>(i) * CellData::MAX_ATTACHMENTS;
+
+        // Iterate in reverse so removing slots doesn't skip entries
+        for (int32_t a = static_cast<int32_t>(cells.attachment_count[i]) - 1; a >= 0; a--) {
+            uint32_t j = cells.attachment_targets[base + a];
+            if (j >= n || j == UINT32_MAX) {
+                // Invalid target — remove stale attachment
+                removeAttachmentSlot(cells, i, static_cast<uint32_t>(a));
+                continue;
+            }
+            if (cells.is_alive[j] == 0) {
+                // Target died — break attachment
+                removeAttachmentBetween(cells, i, j);
+                continue;
+            }
+
+            // Stochastic detachment check
+            if (det_rate > 0.0f && attachUniformRandom() < det_rate * dt) {
+                removeAttachmentBetween(cells, i, j);
+                continue;
+            }
+
+            // Compute spring force: F = -k * (distance - rest_length) * unit_direction
+            double dx = static_cast<double>(cells.position_x[j]) - cells.position_x[i];
+            double dy = static_cast<double>(cells.position_y[j]) - cells.position_y[i];
+            double dz = static_cast<double>(cells.position_z[j]) - cells.position_z[i];
+            double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+            if (dist < 1e-16) continue;
+
+            // Rest length = sum of radii (equilibrium distance)
+            double rest_length = static_cast<double>(cells.radius[i]) +
+                                 static_cast<double>(cells.radius[j]);
+
+            // Spring displacement (positive = stretched beyond rest length)
+            double displacement = dist - rest_length;
+
+            // Force magnitude: F = k * displacement (toward partner if stretched)
+            double force_mag = static_cast<double>(k) * displacement;
+
+            // Unit direction from i to j
+            double ux = dx / dist;
+            double uy = dy / dist;
+            double uz = dz / dist;
+
+            // Add force to velocity (force points toward j when stretched,
+            // away from j when compressed)
+            cells.velocity_x[i] += static_cast<float>(force_mag * ux);
+            cells.velocity_y[i] += static_cast<float>(force_mag * uy);
+            cells.velocity_z[i] += static_cast<float>(force_mag * uz);
+        }
+    }
+}
+
+// ─── tryFormAttachment ───────────────────────────────────────────────
+
+bool tryFormAttachment(CellData& cells, uint32_t cell_a, uint32_t cell_b, double dt) {
+    if (cell_a == cell_b) return false;
+    if (cell_a >= cells.num_cells || cell_b >= cells.num_cells) return false;
+    if (cells.is_alive[cell_a] == 0 || cells.is_alive[cell_b] == 0) return false;
+    if (!cells.attachment_count || !cells.attachment_targets) return false;
+
+    // Check capacity
+    if (cells.attachment_count[cell_a] >= CellData::MAX_ATTACHMENTS) return false;
+    if (cells.attachment_count[cell_b] >= CellData::MAX_ATTACHMENTS) return false;
+
+    // Check if already attached
+    size_t base_a = static_cast<size_t>(cell_a) * CellData::MAX_ATTACHMENTS;
+    for (uint32_t a = 0; a < cells.attachment_count[cell_a]; a++) {
+        if (cells.attachment_targets[base_a + a] == cell_b) return false;
+    }
+
+    // Check distance: must be within interaction distance
+    double dx = static_cast<double>(cells.position_x[cell_b]) - cells.position_x[cell_a];
+    double dy = static_cast<double>(cells.position_y[cell_b]) - cells.position_y[cell_a];
+    double dz = static_cast<double>(cells.position_z[cell_b]) - cells.position_z[cell_a];
+    double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    double R_sum = static_cast<double>(cells.radius[cell_a]) +
+                   static_cast<double>(cells.radius[cell_b]);
+    double max_dist = std::max(
+        static_cast<double>(cells.relative_max_adhesion_distance[cell_a]),
+        static_cast<double>(cells.relative_max_adhesion_distance[cell_b])
+    ) * R_sum;
+
+    if (dist > max_dist) return false;
+
+    // Stochastic attachment check
+    float rate = std::max(cells.attachment_rate[cell_a], cells.attachment_rate[cell_b]);
+    if (rate <= 0.0f) return false;
+    if (attachUniformRandom() >= rate * dt) return false;
+
+    // Form attachment: add to both cells' lists
+    size_t base_b = static_cast<size_t>(cell_b) * CellData::MAX_ATTACHMENTS;
+    cells.attachment_targets[base_a + cells.attachment_count[cell_a]] = cell_b;
+    cells.attachment_count[cell_a]++;
+    cells.attachment_targets[base_b + cells.attachment_count[cell_b]] = cell_a;
+    cells.attachment_count[cell_b]++;
+
+    return true;
+}
+
+// ─── tryFormAllAttachments ───────────────────────────────────────────
+
+void tryFormAllAttachments(CellData& cells, double dt) {
+    if (!cells.attachment_count || !cells.attachment_targets) return;
+
+    uint32_t n = cells.num_cells;
+    for (uint32_t i = 0; i < n; i++) {
+        if (cells.is_alive[i] == 0) continue;
+        if (!cells.attachment_rate || cells.attachment_rate[i] <= 0.0f) continue;
+        if (cells.attachment_count[i] >= CellData::MAX_ATTACHMENTS) continue;
+
+        for (uint32_t j = i + 1; j < n; j++) {
+            if (cells.is_alive[j] == 0) continue;
+            if (!cells.attachment_rate || cells.attachment_rate[j] <= 0.0f) continue;
+
+            tryFormAttachment(cells, i, j, dt);
+
+            // Check if i is full after forming
+            if (cells.attachment_count[i] >= CellData::MAX_ATTACHMENTS) break;
+        }
+    }
 }

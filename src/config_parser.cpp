@@ -184,6 +184,15 @@ SimConfig parseConfig(const char* xml_path) {
                     } else if (rate_idx == 1) {
                         ct.cycle_rate_10 = rval;
                         ct.cycle_fixed_10 = fixed;
+                    } else if (rate_idx == 2) {
+                        ct.cycle_rate_20 = rval;
+                        ct.cycle_fixed_20 = fixed;
+                    } else if (rate_idx == 3) {
+                        ct.cycle_rate_23 = rval;
+                        ct.cycle_fixed_23 = fixed;
+                    } else if (rate_idx == 4) {
+                        ct.cycle_rate_30 = rval;
+                        ct.cycle_fixed_30 = fixed;
                     }
                 }
             }
@@ -281,6 +290,22 @@ SimConfig parseConfig(const char* xml_path) {
                 ct.cell_cell_repulsion = getFloat(mech.child("cell_cell_repulsion_strength"), 10.0f);
                 ct.max_adhesion_distance = getFloat(
                     mech.child("relative_maximum_adhesion_distance"), 1.25f);
+
+                // Adhesion affinities (per target cell type)
+                pugi::xml_node affinities = mech.child("cell_adhesion_affinities");
+                for (pugi::xml_node aff = affinities.child("cell_adhesion_affinity"); aff;
+                     aff = aff.next_sibling("cell_adhesion_affinity"))
+                {
+                    ct.adhesion_affinities.push_back(getFloat(aff, 1.0f));
+                }
+
+                // Attachment mechanics
+                ct.attachment_elastic_constant =
+                    getFloat(mech.child("attachment_elastic_constant"), 0.01f);
+                ct.attachment_rate = getFloat(mech.child("attachment_rate"), 0.0f);
+                ct.detachment_rate = getFloat(mech.child("detachment_rate"), 0.0f);
+                ct.max_attachments =
+                    mech.child("maximum_number_of_attachments").text().as_int(12);
             }
 
             // ── Motility ──
@@ -288,8 +313,53 @@ SimConfig parseConfig(const char* xml_path) {
                 pugi::xml_node mot = phenotype.child("motility");
                 ct.motility_speed = getFloat(mot.child("speed"), 1.0f);
                 ct.motility_bias  = getFloat(mot.child("migration_bias"), 0.5f);
+                ct.persistence_time = getFloat(mot.child("persistence_time"), 15.0f);
+
                 pugi::xml_node opts = mot.child("options");
                 ct.motility_enabled = getBool(opts.child("enabled"), false);
+                ct.restrict_to_2D = getBool(opts.child("use_2D"), true);
+
+                // Chemotaxis
+                pugi::xml_node chemo = opts.child("chemotaxis");
+                ct.chemotaxis_enabled = getBool(chemo.child("enabled"), false);
+                ct.chemotaxis_direction = chemo.child("direction").text().as_int(1);
+
+                // Parse substrate attribute for legacy single-substrate chemotaxis
+                ct.chemotaxis_substrate = chemo.child("substrate").text().as_int(0);
+
+                // Parse chemotactic_sensitivities: comma-separated or
+                // child elements <substrate_sensitivity> per substrate
+                pugi::xml_node sens_node = opts.child("chemotactic_sensitivities");
+                if (sens_node) {
+                    // Try as child elements first
+                    for (pugi::xml_node s = sens_node.child("chemotactic_sensitivity"); s;
+                         s = s.next_sibling("chemotactic_sensitivity")) {
+                        ct.chemotactic_sensitivities.push_back(
+                            static_cast<double>(getFloat(s, 0.0f)));
+                    }
+                    // If no child elements, try as comma-separated text
+                    if (ct.chemotactic_sensitivities.empty()) {
+                        std::string text = getString(sens_node, "");
+                        if (!text.empty()) {
+                            // Parse comma-separated values
+                            size_t pos = 0;
+                            while (pos < text.size()) {
+                                size_t next = text.find(',', pos);
+                                if (next == std::string::npos) next = text.size();
+                                std::string val = text.substr(pos, next - pos);
+                                // Trim whitespace
+                                size_t start = val.find_first_not_of(" \t\n\r");
+                                if (start != std::string::npos) {
+                                    val = val.substr(start);
+                                    size_t end = val.find_last_not_of(" \t\n\r");
+                                    if (end != std::string::npos) val = val.substr(0, end + 1);
+                                    ct.chemotactic_sensitivities.push_back(std::stod(val));
+                                }
+                                pos = next + 1;
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Secretion (first substrate only for simplified model) ──
@@ -302,14 +372,89 @@ SimConfig parseConfig(const char* xml_path) {
                 }
             }
 
-            // ── Custom data (oncoprotein) ──
+            // ── Cell Interactions ──
+            {
+                pugi::xml_node interactions = phenotype.child("cell_interactions");
+                if (interactions) {
+                    ct.apoptotic_phagocytosis_rate =
+                        getFloat(interactions.child("apoptotic_phagocytosis_rate"), 0.0f);
+                    ct.necrotic_phagocytosis_rate =
+                        getFloat(interactions.child("necrotic_phagocytosis_rate"), 0.0f);
+                    ct.other_dead_phagocytosis_rate =
+                        getFloat(interactions.child("other_dead_phagocytosis_rate"), 0.0f);
+                    ct.attack_damage_rate =
+                        getFloat(interactions.child("attack_damage_rate"), 1.0f);
+                    ct.attack_duration =
+                        getFloat(interactions.child("attack_duration"), 0.1f);
+
+                    // Live phagocytosis rates (per target type)
+                    pugi::xml_node phago = interactions.child("live_phagocytosis_rates");
+                    for (pugi::xml_node pr = phago.child("phagocytosis_rate"); pr;
+                         pr = pr.next_sibling("phagocytosis_rate"))
+                    {
+                        ct.phagocytosis_rates.push_back(getFloat(pr, 0.0f));
+                    }
+
+                    // Attack rates (per target type)
+                    pugi::xml_node attacks = interactions.child("attack_rates");
+                    for (pugi::xml_node ar = attacks.child("attack_rate"); ar;
+                         ar = ar.next_sibling("attack_rate"))
+                    {
+                        ct.attack_rates.push_back(getFloat(ar, 0.0f));
+                    }
+
+                    // Fusion rates (per target type)
+                    pugi::xml_node fusions = interactions.child("fusion_rates");
+                    for (pugi::xml_node fr = fusions.child("fusion_rate"); fr;
+                         fr = fr.next_sibling("fusion_rate"))
+                    {
+                        ct.fusion_rates.push_back(getFloat(fr, 0.0f));
+                    }
+                }
+            }
+
+            // ── Cell Transformations ──
+            {
+                pugi::xml_node transformations = phenotype.child("cell_transformations");
+                if (transformations) {
+                    pugi::xml_node rates = transformations.child("transformation_rates");
+                    for (pugi::xml_node tr = rates.child("transformation_rate"); tr;
+                         tr = tr.next_sibling("transformation_rate"))
+                    {
+                        ct.transformation_rates.push_back(getFloat(tr, 0.0f));
+                    }
+                }
+            }
+
+            // ── Cell Integrity ──
+            {
+                pugi::xml_node integrity = phenotype.child("cell_integrity");
+                if (integrity) {
+                    ct.damage_rate = getFloat(integrity.child("damage_rate"), 0.0f);
+                    ct.damage_repair_rate = getFloat(integrity.child("damage_repair_rate"), 0.0f);
+                }
+            }
+
+            // ── Custom data (arbitrary key-value pairs) ──
             {
                 pugi::xml_node custom = cd.child("custom_data");
-                pugi::xml_node onco   = custom.child("oncoprotein");
-                // The base value in the cell definition; distribution params
-                // come from user_parameters
+                // Legacy: oncoprotein distribution parameters
+                pugi::xml_node onco = custom.child("oncoprotein");
                 if (onco) {
                     ct.oncoprotein_mean = getFloat(onco, 1.0f);
+                }
+
+                // Parse ALL custom_data children as key-value doubles
+                for (pugi::xml_node child = custom.first_child(); child;
+                     child = child.next_sibling())
+                {
+                    std::string key = child.name();
+                    double val = 0.0;
+                    const char* text = child.child_value();
+                    if (text && text[0] != '\0') {
+                        try { val = std::stod(text); } catch (...) { val = 0.0; }
+                    }
+                    ct.custom_data[key] = val;
                 }
             }
 
@@ -333,6 +478,31 @@ SimConfig parseConfig(const char* xml_path) {
             ct.oncoprotein_sd   = config.oncoprotein_sd;
             ct.oncoprotein_min  = config.oncoprotein_min;
             ct.oncoprotein_max  = config.oncoprotein_max;
+        }
+    }
+
+    // ─── Initial conditions ───
+    {
+        pugi::xml_node ic = root.child("initial_conditions");
+        if (ic) {
+            pugi::xml_node cell_pos = ic.child("cell_positions");
+            if (cell_pos) {
+                std::string type = cell_pos.attribute("type").as_string("");
+                const char* en_str = cell_pos.attribute("enabled").as_string("false");
+                bool enabled = (strcasecmp(en_str, "true") == 0 || strcmp(en_str, "1") == 0);
+
+                if (enabled && type == "csv") {
+                    config.initial_conditions_type = "csv";
+                    config.initial_conditions_enabled = true;
+
+                    std::string folder = getString(cell_pos.child("folder"), "./config");
+                    std::string filename = getString(cell_pos.child("filename"), "cells.csv");
+
+                    // Build full path
+                    if (!folder.empty() && folder.back() != '/') folder += '/';
+                    config.initial_conditions_csv_file = folder + filename;
+                }
+            }
         }
     }
 

@@ -90,6 +90,7 @@ static void computeGradient(const float* density, const GridParams& grid,
 void MotilityData::allocate(uint32_t max_c) {
     max_cells = max_c;
     num_cells = 0;
+    n_substrates = 0;
     size_t n = max_c;
 
     persistence_time   = static_cast<double*>(calloc(n, sizeof(double)));
@@ -102,6 +103,16 @@ void MotilityData::allocate(uint32_t max_c) {
     restrict_to_2D     = static_cast<uint32_t*>(calloc(n, sizeof(uint32_t)));
     chemotaxis_index   = static_cast<int32_t*>(calloc(n, sizeof(int32_t)));
     chemotaxis_direction = static_cast<int32_t*>(calloc(n, sizeof(int32_t)));
+    chemotactic_sensitivity = nullptr;  // allocated separately via allocateSubstrate()
+}
+
+void MotilityData::allocateSubstrate(uint32_t nsubs) {
+    if (chemotactic_sensitivity) {
+        free(chemotactic_sensitivity);
+    }
+    n_substrates = nsubs;
+    size_t total = static_cast<size_t>(max_cells) * nsubs;
+    chemotactic_sensitivity = static_cast<double*>(calloc(total, sizeof(double)));
 }
 
 void MotilityData::free_all() {
@@ -115,6 +126,8 @@ void MotilityData::free_all() {
     free(restrict_to_2D);     restrict_to_2D = nullptr;
     free(chemotaxis_index);   chemotaxis_index = nullptr;
     free(chemotaxis_direction); chemotaxis_direction = nullptr;
+    free(chemotactic_sensitivity); chemotactic_sensitivity = nullptr;
+    n_substrates = 0;
 }
 
 void MotilityData::setDefaults(uint32_t index) {
@@ -129,6 +142,13 @@ void MotilityData::setDefaults(uint32_t index) {
     restrict_to_2D[index]     = 1;     // 2D default
     chemotaxis_index[index]   = 0;     // first substrate
     chemotaxis_direction[index] = 1;   // up gradient
+
+    // Zero out all per-substrate chemotactic sensitivities
+    if (chemotactic_sensitivity && n_substrates > 0) {
+        for (uint32_t s = 0; s < n_substrates; s++) {
+            chemotactic_sensitivity[static_cast<size_t>(index) * n_substrates + s] = 0.0;
+        }
+    }
 }
 
 void MotilityData::swapRemove(uint32_t index, uint32_t last) {
@@ -143,6 +163,15 @@ void MotilityData::swapRemove(uint32_t index, uint32_t last) {
     restrict_to_2D[index]       = restrict_to_2D[last];
     chemotaxis_index[index]     = chemotaxis_index[last];
     chemotaxis_direction[index] = chemotaxis_direction[last];
+
+    // Copy per-substrate chemotactic sensitivities
+    if (chemotactic_sensitivity && n_substrates > 0) {
+        for (uint32_t s = 0; s < n_substrates; s++) {
+            size_t off_i = static_cast<size_t>(index) * n_substrates + s;
+            size_t off_l = static_cast<size_t>(last)  * n_substrates + s;
+            chemotactic_sensitivity[off_i] = chemotactic_sensitivity[off_l];
+        }
+    }
 }
 
 // ─── updateMotility ──────────────────────────────────────────────────
@@ -184,27 +213,52 @@ void updateMotility(CellData& cells, MotilityData& mot,
                 uniformOnUnitSphere(rx, ry, rz);
             }
 
-            // Compute bias direction from substrate gradient (chemotaxis)
+            // Compute bias direction from multi-substrate chemotaxis.
+            // bias_direction = sum_s(sensitivity[i*n_subs+s] * gradient[s])
+            // Falls back to single-substrate if chemotactic_sensitivity is not allocated.
             double bx = 0.0, by = 0.0, bz = 0.0;
             double bias = mot.motility_bias[i];
 
             if (bias > 0.0 && density != nullptr) {
-                int sub_idx = mot.chemotaxis_index[i];
-                int direction = mot.chemotaxis_direction[i];
+                if (mot.chemotactic_sensitivity && mot.n_substrates > 0) {
+                    // Multi-substrate weighted gradient sum
+                    for (uint32_t s = 0; s < mot.n_substrates; s++) {
+                        double sens = mot.chemotactic_sensitivity[
+                            static_cast<size_t>(i) * mot.n_substrates + s];
+                        if (std::fabs(sens) < 1e-16) continue;
 
-                double gx, gy, gz;
-                computeGradient(density, grid,
-                                cells.position_x[i],
-                                cells.position_y[i],
-                                cells.position_z[i],
-                                sub_idx, gx, gy, gz);
+                        double gx, gy, gz;
+                        computeGradient(density, grid,
+                                        cells.position_x[i],
+                                        cells.position_y[i],
+                                        cells.position_z[i],
+                                        static_cast<int>(s), gx, gy, gz);
+                        bx += sens * gx;
+                        by += sens * gy;
+                        bz += sens * gz;
+                    }
+                } else {
+                    // Legacy single-substrate chemotaxis
+                    int sub_idx = mot.chemotaxis_index[i];
+                    int direction = mot.chemotaxis_direction[i];
 
-                // Normalize gradient to get bias direction
-                double gmag = sqrt(gx*gx + gy*gy + gz*gz);
-                if (gmag > 1e-16) {
-                    bx = direction * gx / gmag;
-                    by = direction * gy / gmag;
-                    bz = direction * gz / gmag;
+                    double gx, gy, gz;
+                    computeGradient(density, grid,
+                                    cells.position_x[i],
+                                    cells.position_y[i],
+                                    cells.position_z[i],
+                                    sub_idx, gx, gy, gz);
+                    bx = direction * gx;
+                    by = direction * gy;
+                    bz = direction * gz;
+                }
+
+                // Normalize bias direction vector
+                double bmag = sqrt(bx*bx + by*by + bz*bz);
+                if (bmag > 1e-16) {
+                    bx /= bmag;
+                    by /= bmag;
+                    bz /= bmag;
                 }
             }
 

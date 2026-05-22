@@ -7,6 +7,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include "../shaders/types.h"
 
 struct SubstrateConfig {
@@ -24,11 +25,17 @@ struct CellTypeConfig {
     int id = 0;
 
     // Cycle
-    int cycle_model_code = 5;     // 5=live, 1=Ki67_basic
+    int cycle_model_code = 5;     // 5=live, 1=Ki67_basic, 0=Ki67_adv, 2=flow_cyto, 7=cycling_Q
     float cycle_rate = 0.0f;      // primary transition rate (phase 0→next)
-    float cycle_rate_10 = 0.0f;   // secondary transition rate (phase 1→0, for Ki67)
+    float cycle_rate_10 = 0.0f;   // secondary transition rate (phase 1→next)
+    float cycle_rate_20 = 0.0f;   // rate 2→0 (Ki67 advanced)
+    float cycle_rate_23 = 0.0f;   // G2→M (flow cytometry)
+    float cycle_rate_30 = 0.0f;   // M→G0/G1 (flow cytometry)
     bool  cycle_fixed_01 = false; // is transition 0→1 fixed duration?
-    bool  cycle_fixed_10 = false; // is transition 1→0 fixed duration?
+    bool  cycle_fixed_10 = false; // is transition 1→next fixed duration?
+    bool  cycle_fixed_20 = false; // is transition 2→0 fixed duration?
+    bool  cycle_fixed_23 = false; // is transition G2→M fixed duration?
+    bool  cycle_fixed_30 = false; // is transition M→G0/G1 fixed duration?
 
     // Death
     float apoptosis_rate = 0.0f;
@@ -69,17 +76,56 @@ struct CellTypeConfig {
     // Motility
     float motility_speed = 1.0f;
     float motility_bias = 0.5f;
+    float persistence_time = 15.0f;
     bool motility_enabled = false;
+    bool restrict_to_2D = true;
+
+    // Chemotaxis
+    bool chemotaxis_enabled = false;
+    int chemotaxis_substrate = 0;
+    int chemotaxis_direction = 1;
+    std::vector<double> chemotactic_sensitivities;  // per-substrate, parsed from XML
 
     // Secretion (per first substrate, simplified)
     float secretion_rate = 0.0f;
     float uptake_rate = 10.0f;
+
+    // ─── Cell Interactions ───
+    // Per-target-type rates (indexed by target cell type ID)
+    std::vector<float> attack_rates;        // attack rate toward each type
+    std::vector<float> phagocytosis_rates;  // live phagocytosis rate toward each type
+    std::vector<float> fusion_rates;        // fusion rate toward each type
+
+    float apoptotic_phagocytosis_rate = 0.0f;
+    float necrotic_phagocytosis_rate = 0.0f;
+    float other_dead_phagocytosis_rate = 0.0f;
+    float attack_damage_rate = 1.0f;
+    float attack_duration = 0.1f;  // minutes
+
+    // ─── Cell Transformations ───
+    std::vector<float> transformation_rates;  // per target type
+
+    // ─── Cell Integrity ───
+    float damage_rate = 0.0f;
+    float damage_repair_rate = 0.0f;
+
+    // ─── Adhesion Affinities ───
+    std::vector<float> adhesion_affinities;  // per target cell type
+
+    // ─── Attachment Mechanics ───
+    float attachment_elastic_constant = 0.01f;
+    float attachment_rate = 0.0f;
+    float detachment_rate = 0.0f;
+    int max_attachments = 12;
 
     // Custom data — oncoprotein distribution parameters
     float oncoprotein_mean = 1.0f;
     float oncoprotein_sd = 0.25f;
     float oncoprotein_min = 0.0f;
     float oncoprotein_max = 2.0f;
+
+    // Custom data — arbitrary key-value pairs from <custom_data>
+    std::map<std::string, double> custom_data;
 };
 
 struct SimConfig {
@@ -118,6 +164,11 @@ struct SimConfig {
     // Options
     bool virtual_wall = true;
     uint32_t random_seed = 0;
+
+    // Initial conditions
+    std::string initial_conditions_type;       // "csv" or empty
+    std::string initial_conditions_csv_file;   // full path to CSV file
+    bool initial_conditions_enabled = false;
 };
 
 /// Parse a PhysiCell_settings.xml file and return a fully populated SimConfig.

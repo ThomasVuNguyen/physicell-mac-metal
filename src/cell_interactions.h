@@ -54,4 +54,34 @@ void ingestCell(CellData& cells, uint32_t eater, uint32_t target);
 ///   - Removes the smaller cell
 void fuseCells(CellData& cells, uint32_t cell_a, uint32_t cell_b);
 
+// ─── Spring Attachment Forces ────────────────────────────────────────
+
+/// Update spring attachment forces for all cells.
+///
+/// For each cell with attachments, computes elastic spring forces:
+///   F = -k * (distance - rest_length) * unit_direction
+/// where rest_length = sum of radii at attachment time (approximated
+/// as current R_i + R_j).
+///
+/// Also handles stochastic detachment: if uniformRandom() < detachment_rate * dt,
+/// the attachment is broken and removed from both cells.
+///
+/// Spring forces are added directly to cell velocities.
+void updateAttachmentForces(CellData& cells, double dt);
+
+/// Try to form a spring attachment between two cells.
+///
+/// Forms an attachment if:
+///   1. distance < interaction_distance (relative_max_adhesion_distance * R_sum)
+///   2. Both cells have room (attachment_count < MAX_ATTACHMENTS)
+///   3. They are not already attached
+///   4. Stochastic check: uniformRandom() < attachment_rate * dt
+///
+/// @return true if attachment was formed
+bool tryFormAttachment(CellData& cells, uint32_t cell_a, uint32_t cell_b, double dt);
+
+/// Scan all cell pairs and attempt to form attachments (brute-force O(n²)).
+/// For production use, this should be replaced with a spatial hash.
+void tryFormAllAttachments(CellData& cells, double dt);
+
 #endif // PHYSICELL_CELL_INTERACTIONS_H

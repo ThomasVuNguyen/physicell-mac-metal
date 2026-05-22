@@ -15,10 +15,12 @@
 #include "output_writer.h"
 #include "motility.h"
 #include "cell_definitions.h"
+#include "cell_interactions.h"
 #include "svg_writer.h"
 #include "signals.h"
 #include "behaviors.h"
 #include "rules.h"
+#include "geometry.h"
 
 // ─────────────────────────────────────────────────────────────────────
 // PhysiCell Metal — Main simulation loop
@@ -31,132 +33,68 @@ static double wallTime() {
     return (double)mach_absolute_time() * info.numer / info.denom / 1e9;
 }
 
-// ─── Initialize cell population for heterogeneity sample ───
-static void initializeHeterogeneityCells(CellData& cells, const SimConfig& config,
-                                          Microenvironment& microenv) {
-    if (config.cell_types.empty()) {
-        printf("  WARNING: No cell types defined, using defaults\n");
-        return;
+// ─── Initialize cell population ───
+// Supports multiple cell types from config. Each type's cells are placed
+// based on its configuration (for now, type 0 gets the hex-packed disc).
+static CellTypeRegistry initializeCells(CellData& cells, const SimConfig& config,
+                                         Microenvironment& microenv, MotilityData& motility) {
+    // Build registry from all parsed cell types
+    CellTypeRegistry registry;
+    registry.buildFromConfig(config.cell_types);
+    printf("  Registered %d cell type(s):\n", registry.numTypes());
+    for (const auto& t : registry.allTypes()) {
+        printf("    [%d] \"%s\" — cycle_rate=%.5f, cycle_model=%d\n",
+               t.id, t.name.c_str(), t.cycle_rate, t.cycle_model_code);
     }
 
-    const auto& ct = config.cell_types[0]; // primary cell type
+    if (config.cell_types.empty()) {
+        printf("  WARNING: No cell types defined, using defaults\n");
+        return registry;
+    }
 
-    // Place cells in a disc/sphere pattern (matching PhysiCell heterogeneity)
-    float x_min = config.x_min + 20;
-    float x_max = config.x_max - 20;
-    float y_min = config.y_min + 20;
-    float y_max = config.y_max - 20;
+    const auto& ct = config.cell_types[0]; // primary cell type for placement geometry
 
-    // Cell spacing ~ 2 * radius
+    // Cell spacing from primary type's volume
     float radius = std::cbrt(3.0f * ct.total_volume / (4.0f * PI_F));
-    float spacing = 0.95f * 2.0f * radius; // slight overlap like PhysiCell
+    float spacing = 0.95f * 2.0f * radius;
 
     // RNG for oncoprotein distribution
     std::mt19937 rng(0);  // deterministic seed
-    std::uniform_real_distribution<float> onco_dist(ct.oncoprotein_min, ct.oncoprotein_max);
-    std::normal_distribution<float> onco_normal(ct.oncoprotein_mean, ct.oncoprotein_sd);
 
     // Place cells using PhysiCell's exact hex-packed, four-fold symmetric layout.
-    // PhysiCell iterates over the first quadrant (x>=0, y>=0) and mirrors to all four.
     float center_x = (config.x_min + config.x_max) / 2.0f;
     float center_y = (config.y_min + config.y_max) / 2.0f;
-    float disc_radius = config.tumor_radius;  // from config (default 250 µm)
-    float y_step = spacing * std::sqrt(3.0f) / 2.0f; // hex packing row offset
+    float disc_radius = config.tumor_radius;
+    float y_step = spacing * std::sqrt(3.0f) / 2.0f;
 
     int count = 0;
+    int type_id = ct.id;  // cell type for this population
+
     auto placeCell = [&](float px, float py) {
         uint32_t idx = cells.addCell();
         if (idx == UINT32_MAX) return;
 
+        // Apply all defaults from registry (volume, mechanics, cycle, death, etc.)
+        registry.applyDefaults(cells, idx, type_id);
+
+        // Set position
         cells.position_x[idx] = center_x + px;
         cells.position_y[idx] = center_y + py;
         cells.position_z[idx] = 0.0f;
 
-        cells.velocity_x[idx] = 0.0f;
-        cells.velocity_y[idx] = 0.0f;
-        cells.velocity_z[idx] = 0.0f;
-        cells.prev_velocity_x[idx] = 0.0f;
-        cells.prev_velocity_y[idx] = 0.0f;
-        cells.prev_velocity_z[idx] = 0.0f;
-
-        // ── Volume: full PhysiCell decomposition ──
-        double V_total = ct.total_volume;
-        double V_nuc   = ct.nuclear_volume;
-        double ff      = ct.fluid_fraction;
-        double V_fluid = ff * V_total;
-        double V_nuc_fluid = ff * V_nuc;
-        double V_nuc_solid = V_nuc - V_nuc_fluid;
-        double V_cyto  = V_total - V_nuc;
-        double V_cyto_solid = V_cyto - ff * V_cyto;
-
-        cells.total_volume[idx] = ct.total_volume;
-        cells.nuclear_volume[idx] = ct.nuclear_volume;
-        cells.radius[idx] = radius;
-        cells.nuclear_radius[idx] = std::cbrt(3.0f * ct.nuclear_volume / (4.0f * PI_F));
-
-        cells.fluid_fraction[idx] = ff;
-        cells.solid_cytoplasmic[idx] = V_cyto_solid;
-        cells.solid_nuclear[idx] = V_nuc_solid;
-        cells.fluid[idx] = V_fluid;
-
-        // Volume ODE rates from config
-        cells.cytoplasmic_biomass_change_rate[idx] = ct.cytoplasmic_biomass_change_rate;
-        cells.nuclear_biomass_change_rate[idx] = ct.nuclear_biomass_change_rate;
-        cells.fluid_change_rate[idx] = ct.fluid_change_rate;
-        cells.calcification_rate[idx] = ct.calcification_rate;
-        cells.calcified_fraction[idx] = 0.0;
-
-        // Volume targets
-        cells.target_solid_cytoplasmic[idx] = V_cyto_solid;
-        cells.target_solid_nuclear[idx] = V_nuc_solid;
-        cells.target_fluid_fraction[idx] = ff;
-        cells.target_volume[idx] = V_total;
-        cells.volume_change_rate[idx] = ct.cytoplasmic_biomass_change_rate;
-        cells.rupture_volume[idx] = ct.relative_rupture_volume * V_total;
-        cells.relative_rupture_volume[idx] = ct.relative_rupture_volume;
-
-        // ── Mechanics ──
-        cells.cell_cell_repulsion[idx] = ct.cell_cell_repulsion;
-        cells.cell_cell_adhesion[idx] = ct.cell_cell_adhesion;
-        cells.relative_max_adhesion_distance[idx] = ct.max_adhesion_distance;
-        cells.motility_speed[idx] = ct.motility_speed;
-
-        // Oncoprotein: normal distribution (matching heterogeneity sample)
+        // Oncoprotein: type-specific distribution
+        const auto& typeDef = registry.getType(type_id);
+        std::normal_distribution<float> onco_normal(typeDef.oncoprotein_mean, typeDef.oncoprotein_sd);
         float onco = onco_normal(rng);
-        onco = std::max(ct.oncoprotein_min, std::min(ct.oncoprotein_max, onco));
+        onco = std::max(typeDef.oncoprotein_min, std::min(typeDef.oncoprotein_max, onco));
         cells.oncoprotein[idx] = onco;
-
-        cells.cell_type[idx] = 0;
-        cells.current_phase[idx] = 0;
-        cells.is_alive[idx] = 1;
 
         // Assign to microenvironment voxel
         cells.voxel_index[idx] = microenv.voxelIndex(center_x + px, center_y + py, 0.0f);
 
-        // ── CPU-only: Cycle fields ──
-        cells.elapsed_time_in_phase[idx] = 0.0;
-        cells.phase_duration[idx] = ct.cycle_rate > 0 ? (1.0 / ct.cycle_rate) : 1e10;
-        cells.birth_rate[idx] = ct.cycle_rate;
-        cells.cycle_model_code[idx] = static_cast<uint32_t>(ct.cycle_model_code);
-        cells.transition_rate_01[idx] = ct.cycle_rate;
-        cells.transition_rate_10[idx] = ct.cycle_rate_10;
-        cells.phase_duration_fixed[idx] = (ct.cycle_fixed_01 ? 1u : 0u)
-                                        | (ct.cycle_fixed_10 ? 2u : 0u);
-        cells.num_phases[idx] = (ct.cycle_model_code == 1) ? 2 : 1;
-
-        // ── CPU-only: Death fields ──
-        cells.death_rate[idx] = ct.apoptosis_rate;
-        cells.necrosis_rate[idx] = ct.necrosis_rate;
-        cells.necrosis_threshold[idx] = 5.0;
-        cells.current_death_model[idx] = 0;
-        cells.lysed[idx] = 0;
-        cells.apoptosis_duration[idx] = 0.0;
-        cells.unlysed_fluid_change_rate[idx] = ct.apop_unlysed_fluid_change_rate;
-        cells.lysed_fluid_change_rate[idx] = ct.apop_lysed_fluid_change_rate;
-
-        // ── CPU-only: Secretion/uptake ──
-        if (cells.uptake_rate)    cells.uptake_rate[idx] = ct.uptake_rate;
-        if (cells.secretion_rate) cells.secretion_rate[idx] = 0.0;
+        // Apply motility defaults from registry (pass n_substrates for multi-substrate chemotaxis)
+        registry.applyMotilityDefaults(motility, idx, type_id, motility.n_substrates);
+        motility.restrict_to_2D[idx] = config.use_2D ? 1 : 0;
 
         count++;
     };
@@ -168,11 +106,11 @@ static void initializeHeterogeneityCells(CellData& cells, const SimConfig& confi
         float x_outer = std::sqrt(disc_radius * disc_radius - y * y);
 
         for (float x = x_start; x < x_outer; x += spacing) {
-            placeCell(x, y);                                   // (+x, +y)
-            if (std::fabs(y) > 0.01f) placeCell(x, -y);       // (+x, -y)
+            placeCell(x, y);
+            if (std::fabs(y) > 0.01f) placeCell(x, -y);
             if (std::fabs(x) > 0.01f) {
-                placeCell(-x, y);                              // (-x, +y)
-                if (std::fabs(y) > 0.01f) placeCell(-x, -y);  // (-x, -y)
+                placeCell(-x, y);
+                if (std::fabs(y) > 0.01f) placeCell(-x, -y);
             }
         }
         row++;
@@ -182,6 +120,8 @@ static void initializeHeterogeneityCells(CellData& cells, const SimConfig& confi
            count, disc_radius, spacing);
     printf("  Oncoprotein range: [%.2f, %.2f], mean=%.2f\n",
            ct.oncoprotein_min, ct.oncoprotein_max, ct.oncoprotein_mean);
+
+    return registry;
 }
 
 // ─── MAIN ───
@@ -237,7 +177,48 @@ int main(int argc, const char* argv[]) {
         GridParams gp = microenv.getGridParams();
         cells.allocateSubstrateBuffers(gp.n_substrates);
 
-        initializeHeterogeneityCells(cells, config, microenv);
+        // Initialize motility data
+        MotilityData motility;
+        motility.allocate(max_cells);
+        motility.allocateSubstrate(gp.n_substrates);
+
+        // Register custom variables from all cell type configs
+        {
+            // Collect unique custom variable names from all cell types
+            for (const auto& ct : config.cell_types) {
+                for (const auto& [key, val] : ct.custom_data) {
+                    cells.registerCustomVariable(key, val);
+                }
+            }
+            if (cells.num_custom_vars > 0) {
+                cells.allocateCustomDataBuffer();
+                printf("  Registered %u custom variable(s):\n", cells.num_custom_vars);
+                const auto& names = cells.getCustomVarNames();
+                for (uint32_t v = 0; v < cells.num_custom_vars; v++) {
+                    printf("    [%u] \"%s\"\n", v, names[v].c_str());
+                }
+            }
+        }
+
+        // Initialize cells from all cell types using the registry
+        CellTypeRegistry registry = initializeCells(cells, config, microenv, motility);
+
+        // Set up per-cell-per-type interaction rate arrays
+        cells.num_cell_types = static_cast<uint32_t>(registry.numTypes());
+        if (cells.num_cell_types > 0) {
+            cells.allocateInteractionRateBuffers();
+            printf("  Allocated interaction rate buffers for %u cell types\n",
+                   cells.num_cell_types);
+        }
+
+        // Load initial conditions from config (CSV cell placement)
+        if (config.initial_conditions_enabled && config.initial_conditions_type == "csv") {
+            printf("  Loading initial conditions from CSV: %s\n",
+                   config.initial_conditions_csv_file.c_str());
+            uint32_t csv_count = loadCellsCSV(cells, microenv,
+                                              config.initial_conditions_csv_file);
+            printf("  Loaded %u cells from initial conditions CSV\n", csv_count);
+        }
 
         // ─── Initialize mechanics ───
         CellMechanics mechanics;
@@ -246,26 +227,6 @@ int main(int argc, const char* argv[]) {
         // ─── Output writers ───
         OutputWriter output(config.output_folder);
         SVGWriter svgWriter;
-
-        // ─── Initialize motility data ───
-        MotilityData motility;
-        motility.allocate(max_cells);
-        // Set motility defaults from config for all existing cells
-        for (uint32_t i = 0; i < cells.num_cells; i++) {
-            if (!config.cell_types.empty()) {
-                const auto& ct = config.cell_types[0];
-                motility.is_motile[i] = (ct.motility_speed > 0) ? 1 : 0;
-                motility.persistence_time[i] = 15.0;  // default 15 min
-                motility.motility_bias[i] = ct.motility_bias;
-                motility.motility_elapsed[i] = 0.0;
-                motility.motility_vec_x[i] = 0.0;
-                motility.motility_vec_y[i] = 0.0;
-                motility.motility_vec_z[i] = 0.0;
-                motility.restrict_to_2D[i] = config.use_2D ? 1 : 0;
-                motility.chemotaxis_index[i] = 0;
-                motility.chemotaxis_direction[i] = 1;
-            }
-        }
 
         // ─── Initialize signal/behavior dictionaries ───
         std::vector<std::string> substrate_names;
@@ -312,9 +273,18 @@ int main(int argc, const char* argv[]) {
                 // SVG output every 10th frame to avoid excessive I/O
                 if (output_frames % 10 == 0) {
                     svgWriter.writeFrame(cells, current_time, output_frames,
-                                        config.output_folder,
-                                        config.x_min, config.x_max,
-                                        config.y_min, config.y_max);
+                                    config.output_folder,
+                                    config.x_min, config.x_max,
+                                    config.y_min, config.y_max);
+                }
+
+                // MultiCellDS XML snapshot
+                {
+                    double elapsed = wallTime() - t_start;
+                    writeMultiCellDSSnapshot(cells, microenv.densityBuffer(),
+                                            microenv.getGridParams(), current_time,
+                                            elapsed, output_frames,
+                                            config.output_folder);
                 }
                 t_output_total += wallTime() - t0;
 
@@ -396,6 +366,10 @@ int main(int argc, const char* argv[]) {
                 // Update motility vectors (before mechanics adds forces)
                 updateMotility(cells, motility, microenv.densityBuffer(),
                                microenv.getGridParams(), dt_phenotype);
+
+                // Spring attachment: try forming new attachments and update forces
+                tryFormAllAttachments(cells, dt_phenotype);
+                updateAttachmentForces(cells, dt_phenotype);
 
                 updatePhenotype(cells, dt_phenotype, current_time,
                                 microenv.densityBuffer(), microenv.getGridParams());

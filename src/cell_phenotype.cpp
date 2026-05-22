@@ -5,7 +5,8 @@
 //
 // Models implemented:
 //   - Multi-compartment volume ODE (standard_volume_update_function)
-//   - Phase-based cell cycle (live + Ki67 basic)
+//   - Phase-based cell cycle (live, Ki67 basic, Ki67 advanced,
+//     flow cytometry basic, cycling-quiescent)
 //   - Full death models (apoptosis + necrosis with swelling/lysis)
 //   - Volume-scaled implicit secretion/uptake
 //   - Cell division with proper compartment halving
@@ -15,6 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────
 
 #include "cell_phenotype.h"
+#include "cell_definitions.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -23,7 +25,8 @@
 
 // Thread-local RNG for stochastic phenotype decisions.
 // Using thread_local so this is safe with dispatch_apply / OpenMP.
-static thread_local std::mt19937 tl_rng{std::random_device{}()};
+// Fixed seed (42) for reproducible results; use std::random_device{}() for non-deterministic.
+static thread_local std::mt19937 tl_rng{42};
 
 static inline double uniformRandom() {
     static thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
@@ -109,6 +112,11 @@ void updateVolume(CellData& cells, uint32_t i, double dt) {
 // Supports:
 //   - Live model (code=5): single phase, division at exit, stochastic
 //   - Ki67 basic (code=1): two phases, Ki67- stochastic, Ki67+ fixed duration
+//   - Ki67 advanced (code=0): three phases, Ki67- stochastic, Ki67+ pre-M fixed,
+//     Ki67+ post-M fixed, division at phase 1 exit
+//   - Flow cytometry basic (code=2) / separated (code=6):
+//     G0/G1 stochastic → S fixed → G2 fixed → M fixed (division at exit)
+//   - Cycling-quiescent (code=7): Q stochastic → Cycling fixed (division at exit)
 
 bool updateCellCycle(CellData& cells, uint32_t i, double dt,
                      const float* density, const GridParams& grid) {
@@ -128,8 +136,8 @@ bool updateCellCycle(CellData& cells, uint32_t i, double dt,
     //   linear interpolation between
     // Heterogeneity sample sets o2_proliferation_saturation = 38 (not 160!)
     double o2_multiplier = 1.0;
-    constexpr double o2_prolif_threshold = 5.0;    // mmHg
-    constexpr double o2_prolif_saturation = 38.0;   // mmHg (set in custom.cpp)
+    double o2_prolif_threshold = cells.o2_proliferation_threshold[i];   // mmHg
+    double o2_prolif_saturation = cells.o2_proliferation_saturation[i]; // mmHg
 
     if (density && grid.n_substrates > 0) {
         uint32_t vi = cells.voxel_index[i];
@@ -203,6 +211,129 @@ bool updateCellCycle(CellData& cells, uint32_t i, double dt,
                 return true;  // flag for division
             }
         }
+    } else if (model == CYCLE_KI67_ADVANCED) {
+        // ── Ki67 advanced: 3 phases ──
+        // Phase 0: Ki67- (quiescent), stochastic transition to phase 1
+        // Phase 1: Ki67+ premitotic, fixed duration, division_at_phase_exit
+        // Phase 2: Ki67+ postmitotic, fixed duration, transition to phase 0
+
+        if (phase == 0) {
+            // Phase 0→1: stochastic, O₂-modulated
+            double rate = cells.transition_rate_01[i]; // 1/(3.62*60)
+            rate *= o2_multiplier;
+
+            if (uniformRandom() < rate * dt) {
+                cells.current_phase[i] = 1;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                // Entry function: double target solid volumes for growth
+                cells.target_solid_cytoplasmic[i] *= 2.0;
+                cells.target_solid_nuclear[i] *= 2.0;
+            }
+
+        } else if (phase == 1) {
+            // Phase 1→2: fixed duration
+            double rate = cells.transition_rate_10[i]; // 1/(13*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                // Division at phase exit
+                cells.current_phase[i] = 2;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                return true;  // flag for division
+            }
+
+        } else if (phase == 2) {
+            // Phase 2→0: fixed duration
+            double rate = cells.transition_rate_20[i]; // 1/(2.5*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                cells.current_phase[i] = 0;
+                cells.elapsed_time_in_phase[i] = 0.0;
+            }
+        }
+
+    } else if (model == CYCLE_FLOW_CYTO || model == CYCLE_FLOW_CYTO_SEP) {
+        // ── Flow cytometry basic: 4 phases ──
+        // Phase 0: G0/G1, stochastic → S
+        // Phase 1: S, fixed duration → G2  (entry: double volumes)
+        // Phase 2: G2, fixed duration → M
+        // Phase 3: M, fixed duration → G0/G1  (division_at_phase_exit)
+
+        if (phase == 0) {
+            // G0/G1 → S: stochastic, O₂-modulated
+            double rate = cells.transition_rate_01[i]; // 0.00324
+            rate *= o2_multiplier;
+
+            if (uniformRandom() < rate * dt) {
+                cells.current_phase[i] = 1;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                // Entry function for S phase: double target solid volumes
+                cells.target_solid_cytoplasmic[i] *= 2.0;
+                cells.target_solid_nuclear[i] *= 2.0;
+            }
+
+        } else if (phase == 1) {
+            // S → G2: fixed duration
+            double rate = cells.transition_rate_10[i]; // 1/(8*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                cells.current_phase[i] = 2;
+                cells.elapsed_time_in_phase[i] = 0.0;
+            }
+
+        } else if (phase == 2) {
+            // G2 → M: fixed duration
+            double rate = cells.transition_rate_23[i]; // 1/(4*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                cells.current_phase[i] = 3;
+                cells.elapsed_time_in_phase[i] = 0.0;
+            }
+
+        } else if (phase == 3) {
+            // M → G0/G1: fixed duration, division at phase exit
+            double rate = cells.transition_rate_30[i]; // 1/(1*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                cells.current_phase[i] = 0;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                return true;  // flag for division
+            }
+        }
+
+    } else if (model == CYCLE_CYCLING_QUIESCENT) {
+        // ── Cycling-quiescent: 2 phases ──
+        // Phase 0: Quiescent, stochastic → Cycling
+        // Phase 1: Cycling, fixed duration → Quiescent (division_at_phase_exit)
+
+        if (phase == 0) {
+            // Q → C: stochastic, O₂-modulated
+            double rate = cells.transition_rate_01[i]; // 1/(4.59*60)
+            rate *= o2_multiplier;
+
+            if (uniformRandom() < rate * dt) {
+                cells.current_phase[i] = 1;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                // Entry function: double target solid volumes
+                cells.target_solid_cytoplasmic[i] *= 2.0;
+                cells.target_solid_nuclear[i] *= 2.0;
+            }
+
+        } else if (phase == 1) {
+            // C → Q: fixed duration, division at phase exit
+            double rate = cells.transition_rate_10[i]; // 1/(15.5*60)
+            double duration = 1.0 / rate;
+
+            if (cells.elapsed_time_in_phase[i] >= duration - 0.5 * dt) {
+                cells.current_phase[i] = 0;
+                cells.elapsed_time_in_phase[i] = 0.0;
+                return true;  // flag for division
+            }
+        }
     }
 
     return false;
@@ -257,9 +388,9 @@ void updateDeath(CellData& cells, uint32_t i, double dt,
     //   If pO2 < o2_necrosis_max → multiplier = 1.0
     //   If pO2 >= threshold → multiplier = 0.0 (no necrosis)
     //   necrosis_rate = multiplier * max_necrosis_rate
-    constexpr double necrosis_threshold = 5.0;   // mmHg
-    constexpr double necrosis_max = 2.5;          // mmHg
-    constexpr double max_necrosis_rate = 1.0 / (6.0 * 60.0); // 0.002778/min
+    double necrosis_threshold = cells.o2_necrosis_threshold[i]; // mmHg
+    double necrosis_max = cells.o2_necrosis_max[i];             // mmHg
+    double max_necrosis_rate_val = cells.max_necrosis_rate[i];  // 1/min
 
     if (density && grid.n_substrates > 0) {
         uint32_t vi = cells.voxel_index[i];
@@ -274,7 +405,7 @@ void updateDeath(CellData& cells, uint32_t i, double dt,
                 if (pO2 < necrosis_max) {
                     multiplier = 1.0;
                 }
-                double effective_rate = max_necrosis_rate * multiplier;
+                double effective_rate = max_necrosis_rate_val * multiplier;
 
                 if (uniformRandom() < effective_rate * dt) {
                     // Trigger necrosis
@@ -508,6 +639,12 @@ uint32_t divideCell(CellData& cells, uint32_t parent) {
     cells.num_phases[daughter]        = cells.num_phases[parent];
     cells.transition_rate_01[daughter] = cells.transition_rate_01[parent];
     cells.transition_rate_10[daughter] = cells.transition_rate_10[parent];
+    if (cells.transition_rate_20)
+        cells.transition_rate_20[daughter] = cells.transition_rate_20[parent];
+    if (cells.transition_rate_23)
+        cells.transition_rate_23[daughter] = cells.transition_rate_23[parent];
+    if (cells.transition_rate_30)
+        cells.transition_rate_30[daughter] = cells.transition_rate_30[parent];
     cells.phase_duration_fixed[daughter] = cells.phase_duration_fixed[parent];
 
     // Volume parameters (rates, targets already set by halving above)
@@ -529,6 +666,20 @@ uint32_t divideCell(CellData& cells, uint32_t parent) {
     cells.unlysed_fluid_change_rate[daughter] = cells.unlysed_fluid_change_rate[parent];
     cells.lysed_fluid_change_rate[daughter]   = cells.lysed_fluid_change_rate[parent];
 
+    // O2/necrosis per-cell parameters
+    cells.o2_proliferation_saturation[daughter] = cells.o2_proliferation_saturation[parent];
+    cells.o2_proliferation_threshold[daughter]  = cells.o2_proliferation_threshold[parent];
+    cells.o2_necrosis_threshold[daughter]       = cells.o2_necrosis_threshold[parent];
+    cells.o2_necrosis_max[daughter]             = cells.o2_necrosis_max[parent];
+    cells.max_necrosis_rate[daughter]           = cells.max_necrosis_rate[parent];
+
+    // Interaction / integrity (inherit rates, reset state)
+    cells.damage[daughter]              = 0.0;   // daughter starts undamaged
+    cells.damage_rate[daughter]         = cells.damage_rate[parent];
+    cells.damage_repair_rate[daughter]  = cells.damage_repair_rate[parent];
+    cells.attack_elapsed[daughter]      = 0.0;
+    cells.attacking_cell[daughter]      = UINT32_MAX;
+
     // ── Inherit secretion/uptake rates ──
     if (cells.secretion_rate && cells.n_substrates > 0) {
         for (uint32_t s = 0; s < cells.n_substrates; s++) {
@@ -544,6 +695,58 @@ uint32_t divideCell(CellData& cells, uint32_t parent) {
     cells.mech_voxel_index[daughter] = cells.mech_voxel_index[parent];
 
     return daughter;
+}
+
+// ─── Cell Integrity / Damage ─────────────────────────────────────────
+//
+// Updates per-cell damage: accumulation + repair.
+// Matches PhysiCell's standard_cell_cell_interactions_and_damage:
+//   damage += dt * damage_rate
+//   damage -= dt * damage_repair_rate
+//   damage = max(0, damage)
+//
+// If damage >= 1.0, triggers apoptosis.
+
+void updateCellIntegrity(CellData& cells, uint32_t i, double dt) {
+    if (cells.current_death_model[i] != DEATH_NONE) return;
+    if (!cells.damage) return;
+
+    double d = cells.damage[i];
+
+    // Accumulate damage (from ongoing attacks, etc.)
+    d += dt * cells.damage_rate[i];
+
+    // Repair damage
+    d -= dt * cells.damage_repair_rate[i];
+
+    // Clamp to [0, ∞)
+    if (d < 0.0) d = 0.0;
+
+    cells.damage[i] = d;
+
+    // Check if damage exceeds lethal threshold
+    if (d >= 1.0) {
+        // Trigger apoptosis from damage
+        cells.current_death_model[i] = DEATH_APOPTOSIS;
+        cells.is_alive[i] = 0;
+        cells.apoptosis_duration[i] = 0.0;
+
+        cells.target_fluid_fraction[i] = 0.0;
+        cells.target_solid_cytoplasmic[i] = 0.0;
+        cells.target_solid_nuclear[i] = 0.0;
+
+        cells.cytoplasmic_biomass_change_rate[i] = 1.0 / 60.0;
+        cells.nuclear_biomass_change_rate[i] = 0.35 / 60.0;
+        cells.fluid_change_rate[i] = cells.unlysed_fluid_change_rate[i];
+        cells.calcification_rate[i] = 0.0;
+
+        cells.relative_rupture_volume[i] = 2.0;
+        cells.rupture_volume[i] =
+            static_cast<double>(cells.total_volume[i]) *
+            cells.relative_rupture_volume[i];
+
+        cells.motility_speed[i] = 0.0f;
+    }
 }
 
 // ─── Master phenotype update ─────────────────────────────────────────
@@ -584,6 +787,14 @@ void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
             continue;
         }
 
+        // Cell integrity / damage repair
+        updateCellIntegrity(cells, i, dt);
+
+        // If damage just killed this cell, skip to next
+        if (cells.current_death_model[i] != DEATH_NONE) {
+            continue;
+        }
+
         // Check for death first (PhysiCell order: phenotype → volume → death → cycle)
         updateDeath(cells, i, dt, density, grid);
 
@@ -599,6 +810,12 @@ void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
         if (updateCellCycle(cells, i, dt, density, grid)) {
             to_divide.push_back(i);
         }
+
+        // Cell-cell interactions (attack, phagocytosis, fusion)
+        standardCellCellInteractions(cells, i, dt, grid);
+
+        // Cell transformations (type switching)
+        standardCellTransformations(cells, i, dt);
     }
 
     // Phase 2: perform divisions
@@ -613,4 +830,228 @@ void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
             cells.removeCell(idx);
         }
     }
+}
+
+// ─── standardCellCellInteractions ────────────────────────────────────
+//
+// Port of PhysiCell standard_cell_cell_interactions()
+// (PhysiCell_standard_models.cpp:1187)
+//
+// For each nearby cell (within interaction distance), checks:
+//   1. Dead target → phagocytosis (apoptotic/necrotic/other rates)
+//   2. Live target → live phagocytosis, attack, fusion (per-type rates)
+//
+// Uses spatial proximity check via position-based neighbor scan.
+
+void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
+                                   const GridParams& grid) {
+    if (cells.current_death_model[i] != DEATH_NONE) return;
+    if (cells.num_cell_types == 0) return;
+
+    // Early exit: skip neighbor scan if this cell has no interaction rates configured
+    bool has_any_rate = false;
+    if (cells.apoptotic_phagocytosis_rate && cells.apoptotic_phagocytosis_rate[i] > 0) has_any_rate = true;
+    if (cells.necrotic_phagocytosis_rate && cells.necrotic_phagocytosis_rate[i] > 0) has_any_rate = true;
+    if (cells.other_dead_phagocytosis_rate && cells.other_dead_phagocytosis_rate[i] > 0) has_any_rate = true;
+    if (!has_any_rate && cells.num_cell_types > 0) {
+        // Check per-type arrays for any non-zero rate
+        for (uint32_t t = 0; t < cells.num_cell_types && !has_any_rate; t++) {
+            size_t off = static_cast<size_t>(i) * cells.num_cell_types + t;
+            if (cells.live_phagocytosis_rates && cells.live_phagocytosis_rates[off] > 0) has_any_rate = true;
+            if (cells.attack_rates && cells.attack_rates[off] > 0) has_any_rate = true;
+            if (cells.fusion_rates && cells.fusion_rates[off] > 0) has_any_rate = true;
+        }
+    }
+    if (!has_any_rate) return;
+
+    bool phagocytosed = false;
+    bool attacked = false;
+    bool fused = false;
+
+    float xi = cells.position_x[i];
+    float yi = cells.position_y[i];
+    float ri = cells.radius[i];
+
+    // Interaction distance: PhysiCell uses mean interaction distance
+    // = sqrt(R_cell^2 + R_neighbor^2) as a rough contact test.
+    // We use a simpler 2.5 * radius as max interaction range.
+    float max_interact_dist = 2.5f * ri;
+
+    for (uint32_t j = 0; j < cells.num_cells; j++) {
+        if (j == i) continue;
+        if (cells.total_volume[j] < 1e-15f) continue;
+
+        // Quick distance check
+        float dx = cells.position_x[j] - xi;
+        float dy = cells.position_y[j] - yi;
+        float dist2 = dx * dx + dy * dy;
+        float rj = cells.radius[j];
+        float interact_r = ri + rj;  // contact distance
+        float max_r = max_interact_dist + rj;
+
+        if (dist2 > max_r * max_r) continue;
+
+        // Only interact if in contact (distance < sum of radii * max_adhesion_distance)
+        float dist = std::sqrt(dist2);
+        if (dist > interact_r * 1.25f) continue;  // 1.25 = default max_adhesion_distance
+
+        uint32_t target_type = cells.cell_type[j];
+
+        if (cells.is_alive[j] == 0) {
+            // ── Dead cell: phagocytosis ──
+            if (phagocytosed) continue;
+
+            // Determine death type
+            bool is_apoptotic = (cells.current_death_model[j] == DEATH_APOPTOSIS);
+            bool is_necrotic  = (cells.current_death_model[j] == DEATH_NECROSIS);
+
+            double prob = 0.0;
+            if (is_apoptotic && cells.apoptotic_phagocytosis_rate) {
+                prob = cells.apoptotic_phagocytosis_rate[i] * dt;
+            } else if (is_necrotic && cells.necrotic_phagocytosis_rate) {
+                prob = cells.necrotic_phagocytosis_rate[i] * dt;
+            } else if (cells.other_dead_phagocytosis_rate) {
+                prob = cells.other_dead_phagocytosis_rate[i] * dt;
+            }
+
+            if (prob > 0.0 && uniformRandom() < prob) {
+                // Absorb target volumes into eater
+                if (cells.fluid) {
+                    cells.fluid[i] += cells.fluid[j];
+                    cells.fluid[j] = 0.0;
+                }
+                if (cells.solid_cytoplasmic) {
+                    cells.solid_cytoplasmic[i] += cells.solid_cytoplasmic[j];
+                    cells.solid_cytoplasmic[j] = 0.0;
+                }
+                if (cells.solid_nuclear) {
+                    cells.solid_cytoplasmic[i] += cells.solid_nuclear[j];
+                    cells.solid_nuclear[j] = 0.0;
+                }
+                // Zero target
+                cells.total_volume[j] = 0.0f;
+                cells.nuclear_volume[j] = 0.0f;
+                phagocytosed = true;
+            }
+        } else {
+            // ── Live cell interactions ──
+
+            // Live phagocytosis
+            if (!phagocytosed && cells.live_phagocytosis_rates && cells.num_cell_types > 0) {
+                size_t off = static_cast<size_t>(i) * cells.num_cell_types + target_type;
+                double prob = cells.live_phagocytosis_rates[off] * dt;
+                if (prob > 0.0 && uniformRandom() < prob) {
+                    if (cells.fluid) {
+                        cells.fluid[i] += cells.fluid[j];
+                        cells.fluid[j] = 0.0;
+                    }
+                    if (cells.solid_cytoplasmic) {
+                        cells.solid_cytoplasmic[i] += cells.solid_cytoplasmic[j];
+                        cells.solid_cytoplasmic[j] = 0.0;
+                    }
+                    if (cells.solid_nuclear) {
+                        cells.solid_cytoplasmic[i] += cells.solid_nuclear[j];
+                        cells.solid_nuclear[j] = 0.0;
+                    }
+                    cells.total_volume[j] = 0.0f;
+                    cells.nuclear_volume[j] = 0.0f;
+                    cells.is_alive[j] = 0;
+                    cells.current_death_model[j] = DEATH_APOPTOSIS;
+                    phagocytosed = true;
+                }
+            }
+
+            // Attack
+            if (!attacked && cells.attack_rates && cells.num_cell_types > 0) {
+                size_t off = static_cast<size_t>(i) * cells.num_cell_types + target_type;
+                double attack_rate = cells.attack_rates[off];
+                // PhysiCell: probability = attack_rate * immunogenicity * dt
+                double prob = attack_rate * dt;
+                if (prob > 0.0 && uniformRandom() < prob) {
+                    // Apply damage to target
+                    if (cells.damage && cells.attack_damage_rate) {
+                        cells.damage[j] += cells.attack_damage_rate[i] * dt;
+                    }
+                    attacked = true;
+                }
+            }
+
+            // Fusion
+            if (!fused && cells.fusion_rates && cells.num_cell_types > 0) {
+                size_t off = static_cast<size_t>(i) * cells.num_cell_types + target_type;
+                double prob = cells.fusion_rates[off] * dt;
+                if (prob > 0.0 && uniformRandom() < prob) {
+                    // Absorb j into i (simplified fusion)
+                    double vol_i = static_cast<double>(cells.total_volume[i]);
+                    double vol_j = static_cast<double>(cells.total_volume[j]);
+                    double total = vol_i + vol_j;
+                    // Volume-weighted position
+                    cells.position_x[i] = static_cast<float>(
+                        (vol_i * cells.position_x[i] + vol_j * cells.position_x[j]) / total);
+                    cells.position_y[i] = static_cast<float>(
+                        (vol_i * cells.position_y[i] + vol_j * cells.position_y[j]) / total);
+                    // Absorb volumes
+                    if (cells.fluid) { cells.fluid[i] += cells.fluid[j]; cells.fluid[j] = 0; }
+                    if (cells.solid_cytoplasmic) { cells.solid_cytoplasmic[i] += cells.solid_cytoplasmic[j]; cells.solid_cytoplasmic[j] = 0; }
+                    if (cells.solid_nuclear) { cells.solid_nuclear[i] += cells.solid_nuclear[j]; cells.solid_nuclear[j] = 0; }
+                    cells.total_volume[j] = 0.0f;
+                    cells.nuclear_volume[j] = 0.0f;
+                    cells.is_alive[j] = 0;
+                    fused = true;
+                }
+            }
+        }
+    }
+}
+
+// ─── standardCellTransformations ─────────────────────────────────────
+//
+// Port of PhysiCell standard_cell_transformations()
+// (PhysiCell_standard_models.cpp:1357)
+//
+// For each registered cell type, checks if the cell transforms with
+// probability = transformation_rate[type] * dt.
+
+void standardCellTransformations(CellData& cells, uint32_t i, double dt) {
+    if (cells.current_death_model[i] != DEATH_NONE) return;
+    if (!cells.transformation_rates || cells.num_cell_types == 0) return;
+
+    for (uint32_t t = 0; t < cells.num_cell_types; t++) {
+        if (t == cells.cell_type[i]) continue;  // skip self-type
+
+        size_t off = static_cast<size_t>(i) * cells.num_cell_types + t;
+        double prob = cells.transformation_rates[off] * dt;
+
+        if (prob > 0.0 && uniformRandom() <= prob) {
+            // Transform: change cell type and reset defaults
+            cells.cell_type[i] = t;
+            // Note: in the full implementation, this should call
+            // convertCellType() to re-apply all defaults from the registry.
+            // For now, just change the type ID.
+            return;  // only one transformation per step
+        }
+    }
+}
+
+// ─── convertCellType ─────────────────────────────────────────────────
+//
+// Convert cell i to a new type by re-applying all defaults from the
+// CellTypeRegistry. Preserves position, volume, and phase state.
+
+void convertCellType(CellData& cells, uint32_t i, int new_type_id,
+                     const CellTypeRegistry& registry) {
+    // Save position
+    float px = cells.position_x[i];
+    float py = cells.position_y[i];
+    float pz = cells.position_z[i];
+    uint32_t vox = cells.voxel_index[i];
+
+    // Re-apply all defaults from the new type
+    registry.applyDefaults(cells, i, new_type_id);
+
+    // Restore position (applyDefaults would have zeroed it)
+    cells.position_x[i] = px;
+    cells.position_y[i] = py;
+    cells.position_z[i] = pz;
+    cells.voxel_index[i] = vox;
 }

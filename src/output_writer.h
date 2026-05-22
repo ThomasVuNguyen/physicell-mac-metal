@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "cell_data.h"
+#include "../shaders/types.h"
 
 class OutputWriter {
 public:
@@ -34,5 +35,16 @@ private:
     std::string folder_;
     std::vector<std::string> frame_files_;  // paths to individual frame JSONs
 };
+
+/// Write a MultiCellDS-format XML snapshot.
+///
+/// Produces output/output{frame:08d}.xml containing:
+///   - Metadata (current time, runtime)
+///   - Microenvironment mesh + substrate densities
+///   - Cellular information (positions, volumes, types, phases, custom data)
+void writeMultiCellDSSnapshot(const CellData& cells, const float* density,
+                              const GridParams& grid, double current_time,
+                              double elapsed_sec, int frame_index,
+                              const std::string& output_folder);
 
 #endif // PHYSICELL_OUTPUT_WRITER_H

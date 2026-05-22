@@ -110,3 +110,174 @@ void OutputWriter::writeAllFrames() {
     std::printf("OutputWriter: wrote %zu frames to %s\n",
                 frame_files_.size(), path.c_str());
 }
+
+// ─── MultiCellDS XML Snapshot ────────────────────────────────────────
+
+void writeMultiCellDSSnapshot(const CellData& cells, const float* density,
+                              const GridParams& grid, double current_time,
+                              double elapsed_sec, int frame_index,
+                              const std::string& output_folder) {
+    // Build filename: output/output00000000.xml
+    char fname[512];
+    std::snprintf(fname, sizeof(fname), "%s/output%08d.xml",
+                  output_folder.c_str(), frame_index);
+
+    std::ofstream ofs(fname);
+    if (!ofs.is_open()) {
+        std::fprintf(stderr, "writeMultiCellDSSnapshot: failed to open %s\n", fname);
+        return;
+    }
+
+    ofs << std::fixed;
+
+    // ─── XML header + root ───
+    ofs << "<?xml version=\"1.0\"?>\n";
+    ofs << "<MultiCellDS version=\"2\" type=\"snapshot/simulation\">\n";
+
+    // ─── Metadata ───
+    ofs << "  <metadata>\n";
+    ofs << "    <current_time units=\"min\">" << std::setprecision(4) << current_time << "</current_time>\n";
+    ofs << "    <current_runtime units=\"sec\">" << std::setprecision(4) << elapsed_sec << "</current_runtime>\n";
+    ofs << "  </metadata>\n";
+
+    // ─── Microenvironment ───
+    ofs << "  <microenvironment>\n";
+    ofs << "    <domain>\n";
+    ofs << "      <mesh type=\"Cartesian\" uniform=\"true\">\n";
+
+    // X coordinates
+    ofs << "        <x_coordinates delimiter=\" \">";
+    for (uint32_t i = 0; i < grid.nx; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(2) << (grid.x_min + (i + 0.5f) * grid.dx);
+    }
+    ofs << "</x_coordinates>\n";
+
+    // Y coordinates
+    ofs << "        <y_coordinates delimiter=\" \">";
+    for (uint32_t j = 0; j < grid.ny; j++) {
+        if (j > 0) ofs << " ";
+        ofs << std::setprecision(2) << (grid.y_min + (j + 0.5f) * grid.dy);
+    }
+    ofs << "</y_coordinates>\n";
+
+    ofs << "      </mesh>\n";
+    ofs << "    </domain>\n";
+
+    // Substrate densities
+    ofs << "    <variables>\n";
+    uint32_t total_voxels = grid.nx * grid.ny * std::max(grid.nz, 1u);
+
+    for (uint32_t s = 0; s < grid.n_substrates; s++) {
+        ofs << "      <variable name=\"substrate_" << s << "\" units=\"mmHg\" ID=\"" << s << "\">\n";
+        ofs << "        <data type=\"list\" delimiter=\" \">";
+        for (uint32_t v = 0; v < total_voxels; v++) {
+            if (v > 0) ofs << " ";
+            ofs << std::setprecision(4) << density[s * total_voxels + v];
+        }
+        ofs << "</data>\n";
+        ofs << "      </variable>\n";
+    }
+
+    ofs << "    </variables>\n";
+    ofs << "  </microenvironment>\n";
+
+    // ─── Cellular information ───
+    ofs << "  <cellular_information>\n";
+    ofs << "    <cell_populations>\n";
+    ofs << "      <cell_population type=\"individual\">\n";
+    ofs << "        <custom_cell_data>\n";
+
+    uint32_t n = cells.num_cells;
+
+    // ID
+    ofs << "          <simple_variable name=\"ID\" type=\"int\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << i;
+    }
+    ofs << "</simple_variable>\n";
+
+    // position_x
+    ofs << "          <simple_variable name=\"position_x\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.position_x[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // position_y
+    ofs << "          <simple_variable name=\"position_y\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.position_y[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // position_z
+    ofs << "          <simple_variable name=\"position_z\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.position_z[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // total_volume
+    ofs << "          <simple_variable name=\"total_volume\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.total_volume[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // cell_type
+    ofs << "          <simple_variable name=\"cell_type\" type=\"int\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << cells.cell_type[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // current_phase
+    ofs << "          <simple_variable name=\"current_phase\" type=\"int\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << cells.current_phase[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // elapsed_time_in_phase
+    ofs << "          <simple_variable name=\"elapsed_time_in_phase\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.elapsed_time_in_phase[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // oncoprotein
+    ofs << "          <simple_variable name=\"oncoprotein\" type=\"double\">";
+    for (uint32_t i = 0; i < n; i++) {
+        if (i > 0) ofs << " ";
+        ofs << std::setprecision(4) << cells.oncoprotein[i];
+    }
+    ofs << "</simple_variable>\n";
+
+    // Custom variables
+    const auto& customNames = cells.getCustomVarNames();
+    for (uint32_t v = 0; v < cells.num_custom_vars; v++) {
+        ofs << "          <simple_variable name=\"" << customNames[v] << "\" type=\"double\">";
+        for (uint32_t i = 0; i < n; i++) {
+            if (i > 0) ofs << " ";
+            ofs << std::setprecision(4) << cells.getCustomVariable(i, v);
+        }
+        ofs << "</simple_variable>\n";
+    }
+
+    ofs << "        </custom_cell_data>\n";
+    ofs << "      </cell_population>\n";
+    ofs << "    </cell_populations>\n";
+    ofs << "  </cellular_information>\n";
+    ofs << "</MultiCellDS>\n";
+
+    ofs.close();
+}

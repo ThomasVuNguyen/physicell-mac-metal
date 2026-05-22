@@ -21,12 +21,19 @@ static constexpr uint32_t DEATH_APOPTOSIS = 1;
 static constexpr uint32_t DEATH_NECROSIS  = 2;
 
 // ─── Cycle model codes (matching PhysiCell constants) ───
-static constexpr uint32_t CYCLE_LIVE       = 5;  // live cells cycle model
-static constexpr uint32_t CYCLE_KI67_BASIC = 1;  // Ki67 basic
+static constexpr uint32_t CYCLE_KI67_ADVANCED     = 0;  // Ki67 advanced (3 phases)
+static constexpr uint32_t CYCLE_KI67_BASIC        = 1;  // Ki67 basic (2 phases)
+static constexpr uint32_t CYCLE_FLOW_CYTO         = 2;  // flow cytometry basic (4 phases)
+static constexpr uint32_t CYCLE_LIVE              = 5;  // live cells cycle model (1 phase)
+static constexpr uint32_t CYCLE_FLOW_CYTO_SEP     = 6;  // flow cytometry separated (alias)
+static constexpr uint32_t CYCLE_CYCLING_QUIESCENT = 7;  // cycling-quiescent (2 phases)
 
 // ─── Phase indices ───
 // For live model:  phase 0 = Live (division_at_phase_exit)
 // For Ki67 basic:  phase 0 = Ki67-, phase 1 = Ki67+
+// For Ki67 advanced: phase 0 = Ki67- (Q), phase 1 = Ki67+ pre-M, phase 2 = Ki67+ post-M
+// For flow cytometry: phase 0 = G0/G1, phase 1 = S, phase 2 = G2, phase 3 = M
+// For cycling-quiescent: phase 0 = Quiescent, phase 1 = Cycling
 static constexpr uint32_t PHASE_KI67_NEG = 0;
 static constexpr uint32_t PHASE_KI67_POS = 1;
 
@@ -36,8 +43,8 @@ void updatePhenotype(CellData& cells, double dt, double current_time,
                      const float* density, const GridParams& grid);
 
 /// Advance the cell cycle for cell i using the full phase-based model.
-/// Supports live (single-phase) and Ki67 basic (two-phase) models.
-/// Returns true if cell should divide.
+/// Supports live, Ki67 basic, Ki67 advanced, flow cytometry, and
+/// cycling-quiescent models.  Returns true if cell should divide.
 bool updateCellCycle(CellData& cells, uint32_t i, double dt,
                      const float* density, const GridParams& grid);
 
@@ -64,5 +71,25 @@ void processSecretion(CellData& cells, float* density,
 /// Handle cell division: halve all volume compartments, create daughter cell.
 /// Returns the index of the new daughter cell, or UINT32_MAX on failure.
 uint32_t divideCell(CellData& cells, uint32_t parent_index);
+
+/// Run contact-based cell-cell interactions for cell i.
+/// Scans nearby cells (within interaction distance) and probabilistically
+/// triggers phagocytosis, attack, or fusion. Matches PhysiCell's
+/// standard_cell_cell_interactions().
+void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
+                                   const GridParams& grid);
+
+/// Run cell transformations for cell i.
+/// Checks per-type transformation rates and stochastically converts
+/// the cell to a new type. Matches PhysiCell's standard_cell_transformations().
+void standardCellTransformations(CellData& cells, uint32_t i, double dt);
+
+/// Update cell integrity (damage accumulation/repair) for cell i.
+void updateCellIntegrity(CellData& cells, uint32_t i, double dt);
+
+/// Convert cell i to a new cell type by re-applying defaults from the registry.
+class CellTypeRegistry;
+void convertCellType(CellData& cells, uint32_t i, int new_type_id,
+                     const CellTypeRegistry& registry);
 
 #endif // PHYSICELL_CELL_PHENOTYPE_H

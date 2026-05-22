@@ -39,13 +39,21 @@ struct MotilityData {
     uint32_t* restrict_to_2D;   // 0 = 3D, 1 = 2D only
 
     // Chemotaxis
-    int32_t* chemotaxis_index;      // substrate index for gradient bias
-    int32_t* chemotaxis_direction;  // +1 = up gradient, -1 = down
+    int32_t* chemotaxis_index;      // substrate index for gradient bias (legacy single-substrate)
+    int32_t* chemotaxis_direction;  // +1 = up gradient, -1 = down (legacy)
+
+    // Multi-substrate chemotaxis
+    double* chemotactic_sensitivity;  // size = max_cells * n_substrates
+    uint32_t n_substrates;            // number of substrates (set in allocateSubstrate)
 
     MotilityData() = default;
 
     /// Allocate all arrays for max_cells. Zero-initializes.
     void allocate(uint32_t max_cells);
+
+    /// Allocate per-substrate chemotactic_sensitivity array.
+    /// Must be called after allocate() and after n_substrates is known.
+    void allocateSubstrate(uint32_t n_substrates);
 
     /// Free all arrays.
     void free_all();
