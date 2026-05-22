@@ -17,6 +17,7 @@
 
 #include "cell_phenotype.h"
 #include "cell_definitions.h"
+#include "cell_mechanics.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -72,12 +73,17 @@ void updateVolume(CellData& cells, uint32_t i, double dt) {
     if (nuclear_solid < 0.0) nuclear_solid = 0.0;
 
     // Step 4: Cytoplasmic solid biomass
-    // In PhysiCell, target_solid_cytoplasmic is dynamically set as:
+    // PhysiCell dynamically recomputes target_solid_cytoplasmic each step:
     //   target_sc = target_cytoplasmic_to_nuclear_ratio * target_solid_nuclear
-    // We use the stored target_solid_cytoplasmic which should already be set.
-    // dV_cs/dt = cytoplasmic_biomass_change_rate * (target_solid_cyto - V_cs)
+    // (PhysiCell_standard_models.cpp line 536-537)
+    double target_sc = cells.target_solid_cytoplasmic[i];
+    if (cells.target_cyto_to_nuclear_ratio) {
+        target_sc = cells.target_cyto_to_nuclear_ratio[i]
+                  * cells.target_solid_nuclear[i];
+        cells.target_solid_cytoplasmic[i] = target_sc;
+    }
     cyto_solid += dt * cells.cytoplasmic_biomass_change_rate[i] *
-        (cells.target_solid_cytoplasmic[i] - cyto_solid);
+        (target_sc - cyto_solid);
     if (cyto_solid < 0.0) cyto_solid = 0.0;
 
     // Step 5: Calcification
@@ -757,7 +763,8 @@ void updateCellIntegrity(CellData& cells, uint32_t i, double dt) {
 // ─── Master phenotype update ─────────────────────────────────────────
 
 void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
-                     const float* density, const GridParams& grid) {
+                     const float* density, const GridParams& grid,
+                     const CellMechanics* mech) {
     // Collect indices that need division (can't modify num_cells mid-loop)
     std::vector<uint32_t> to_divide;
     to_divide.reserve(64);
@@ -817,7 +824,7 @@ void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
         }
 
         // Cell-cell interactions (attack, phagocytosis, fusion)
-        standardCellCellInteractions(cells, i, dt, grid);
+        standardCellCellInteractions(cells, i, dt, grid, mech);
 
         // Cell transformations (type switching)
         standardCellTransformations(cells, i, dt);
@@ -849,7 +856,8 @@ void updatePhenotype(CellData& cells, double dt, double /*current_time*/,
 // Uses spatial proximity check via position-based neighbor scan.
 
 void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
-                                   const GridParams& grid) {
+                                   const GridParams& grid,
+                                   const CellMechanics* mech) {
     if (cells.current_death_model[i] != DEATH_NONE) return;
     if (cells.num_cell_types == 0) return;
 
@@ -882,11 +890,70 @@ void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
     // We use a simpler 2.5 * radius as max interaction range.
     float max_interact_dist = 2.5f * ri;
 
-    for (uint32_t j = 0; j < cells.num_cells; j++) {
-        if (j == i) continue;
+    // ── Build neighbor list using spatial hash (O(neighbors)) or fallback (O(N)) ──
+    // Stack-allocated small vector of candidate neighbors
+    constexpr uint32_t MAX_NEIGHBORS = 512;
+    uint32_t neighbors[MAX_NEIGHBORS];
+    uint32_t n_neighbors = 0;
+
+    if (mech) {
+        // Spatial hash path: iterate Moore neighborhood (3x3x3 voxels)
+        const auto& mp = mech->params();
+        uint32_t vi = mech->voxelIndexFromPosition(xi, yi, cells.position_z[i]);
+
+        // Decode vi → (vx, vy, vz)
+        uint32_t vx = vi % mp.mech_grid_nx;
+        uint32_t vy = (vi / mp.mech_grid_nx) % mp.mech_grid_ny;
+        uint32_t vz = vi / (mp.mech_grid_nx * mp.mech_grid_ny);
+
+        for (int dk = -1; dk <= 1; dk++) {
+            int nz = (int)vz + dk;
+            if (nz < 0 || nz >= (int)mp.mech_grid_nz) continue;
+            for (int dj = -1; dj <= 1; dj++) {
+                int ny = (int)vy + dj;
+                if (ny < 0 || ny >= (int)mp.mech_grid_ny) continue;
+                for (int di = -1; di <= 1; di++) {
+                    int nx = (int)vx + di;
+                    if (nx < 0 || nx >= (int)mp.mech_grid_nx) continue;
+
+                    uint32_t nv = (uint32_t)nz * mp.mech_grid_ny * mp.mech_grid_nx
+                                + (uint32_t)ny * mp.mech_grid_nx
+                                + (uint32_t)nx;
+                    uint32_t count = mech->voxelCellCount(nv);
+                    const uint32_t* voxel_cells = mech->voxelCells(nv);
+                    if (!voxel_cells) continue;
+
+                    for (uint32_t c = 0; c < count && n_neighbors < MAX_NEIGHBORS; c++) {
+                        uint32_t j = voxel_cells[c];
+                        if (j != i && j < cells.num_cells) {
+                            neighbors[n_neighbors++] = j;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback: brute-force O(N) scan
+        for (uint32_t j = 0; j < cells.num_cells && n_neighbors < MAX_NEIGHBORS; j++) {
+            if (j == i) continue;
+            if (cells.total_volume[j] < 1e-15f) continue;
+            float dx = cells.position_x[j] - xi;
+            float dy = cells.position_y[j] - yi;
+            float dist2 = dx * dx + dy * dy;
+            float rj = cells.radius[j];
+            float max_r = max_interact_dist + rj;
+            if (dist2 <= max_r * max_r) {
+                neighbors[n_neighbors++] = j;
+            }
+        }
+    }
+
+    // ── Iterate neighbors ──
+    for (uint32_t ni = 0; ni < n_neighbors; ni++) {
+        uint32_t j = neighbors[ni];
         if (cells.total_volume[j] < 1e-15f) continue;
 
-        // Quick distance check
+        // Distance check
         float dx = cells.position_x[j] - xi;
         float dy = cells.position_y[j] - yi;
         float dist2 = dx * dx + dy * dy;
@@ -896,7 +963,6 @@ void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
 
         if (dist2 > max_r * max_r) continue;
 
-        // Only interact if in contact (distance < sum of radii * max_adhesion_distance)
         float dist = std::sqrt(dist2);
         if (dist > interact_r * 1.25f) continue;  // 1.25 = default max_adhesion_distance
 
@@ -971,7 +1037,13 @@ void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
                 size_t off = static_cast<size_t>(i) * cells.num_cell_types + target_type;
                 double attack_rate = cells.attack_rates[off];
                 // PhysiCell: probability = attack_rate * immunogenicity * dt
-                double prob = attack_rate * dt;
+                double immunogenicity = 1.0;
+                if (cells.immunogenicities && cells.num_cell_types > 0) {
+                    // immunogenicity of target j to attacker i's cell type
+                    size_t imm_off = static_cast<size_t>(j) * cells.num_cell_types + cells.cell_type[i];
+                    immunogenicity = cells.immunogenicities[imm_off];
+                }
+                double prob = attack_rate * immunogenicity * dt;
                 if (prob > 0.0 && uniformRandom() < prob) {
                     // Apply damage to target
                     if (cells.damage && cells.attack_damage_rate) {

@@ -49,6 +49,7 @@ CellData::CellData(uint32_t max_cells)
     target_solid_cytoplasmic = target_solid_nuclear = nullptr;
     target_fluid_fraction = nullptr;
     rupture_volume = relative_rupture_volume = nullptr;
+    target_cyto_to_nuclear_ratio = nullptr;
 
     // Death fields
     necrosis_rate = necrosis_threshold = nullptr;
@@ -73,6 +74,7 @@ CellData::CellData(uint32_t max_cells)
     other_dead_phagocytosis_rate = nullptr;
     live_phagocytosis_rates = attack_rates = fusion_rates = nullptr;
     transformation_rates = nullptr;
+    immunogenicities = nullptr;
     num_cell_types = 0;
 
     // Spring attachment fields
@@ -227,6 +229,7 @@ void CellData::allocateCPUBuffers() {
     target_fluid_fraction         = static_cast<double*>(calloc(n, sizeof(double)));
     rupture_volume                = static_cast<double*>(calloc(n, sizeof(double)));
     relative_rupture_volume       = static_cast<double*>(calloc(n, sizeof(double)));
+    target_cyto_to_nuclear_ratio  = static_cast<double*>(calloc(n, sizeof(double)));
 
     // Death fields (5 doubles + 2 uint32)
     necrosis_rate                 = static_cast<double*>(calloc(n, sizeof(double)));
@@ -303,6 +306,7 @@ void CellData::freeCPUBuffers() {
         free(target_fluid_fraction);         target_fluid_fraction = nullptr;
         free(rupture_volume);                rupture_volume = nullptr;
         free(relative_rupture_volume);       relative_rupture_volume = nullptr;
+        free(target_cyto_to_nuclear_ratio);  target_cyto_to_nuclear_ratio = nullptr;
 
         // Death fields
         free(necrosis_rate);                 necrosis_rate = nullptr;
@@ -354,6 +358,7 @@ void CellData::freeCPUBuffers() {
         free(attack_rates);                  attack_rates = nullptr;
         free(fusion_rates);                  fusion_rates = nullptr;
         free(transformation_rates);          transformation_rates = nullptr;
+        free(immunogenicities);              immunogenicities = nullptr;
 
         cpu_buffers_owned_ = false;
     }
@@ -444,6 +449,7 @@ void CellData::removeCell(uint32_t index) {
         swap_d(target_solid_cytoplasmic); swap_d(target_solid_nuclear);
         swap_d(target_fluid_fraction);
         swap_d(rupture_volume); swap_d(relative_rupture_volume);
+        swap_d(target_cyto_to_nuclear_ratio);
         // Death
         swap_d(necrosis_rate); swap_d(necrosis_threshold);
         swap_d(apoptosis_duration);
@@ -508,6 +514,7 @@ void CellData::removeCell(uint32_t index) {
             swap_per_type(attack_rates);
             swap_per_type(fusion_rates);
             swap_per_type(transformation_rates);
+            swap_per_type(immunogenicities);
         }
 
         // Per-substrate arrays
@@ -611,6 +618,8 @@ void CellData::setDefaults(uint32_t index) {
     if (target_fluid_fraction)         target_fluid_fraction[index] = ff;
     if (rupture_volume)                rupture_volume[index] = 2.0 * V_total;
     if (relative_rupture_volume)       relative_rupture_volume[index] = 2.0;
+    // PhysiCell default: cyto/nuclear ratio ≈ 3.62 (MCF-7 reference)
+    if (target_cyto_to_nuclear_ratio)  target_cyto_to_nuclear_ratio[index] = 3.62;
 
     // ── CPU-only: Death fields ──
     if (necrosis_rate)                 necrosis_rate[index] = 0.0;
@@ -741,4 +750,10 @@ void CellData::allocateInteractionRateBuffers() {
     attack_rates            = static_cast<float*>(calloc(total, sizeof(float)));
     fusion_rates            = static_cast<float*>(calloc(total, sizeof(float)));
     transformation_rates    = static_cast<float*>(calloc(total, sizeof(float)));
+    immunogenicities        = static_cast<float*>(calloc(total, sizeof(float)));
+
+    // PhysiCell default: immunogenicity = 1.0 for all type combinations
+    for (size_t k = 0; k < total; k++) {
+        immunogenicities[k] = 1.0f;
+    }
 }

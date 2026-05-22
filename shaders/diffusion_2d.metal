@@ -3,6 +3,12 @@
 // 2D LOD (Locally One-Dimensional) diffusion-decay solver
 // Thomas algorithm on tridiagonal system per row/column
 //
+// Decay is embedded into the tridiagonal diagonal via LOD splitting:
+//   half_decay = 0.5 * lambda * dt
+//   Interior diagonal:  1 + 2*coeff + half_decay
+//   Boundary diagonal:  1 + coeff + half_decay
+// This matches PhysiCell BioFVM_solvers.cpp LOD_2D exactly.
+//
 // Supports Dirichlet BCs: boundary voxels are fixed at target_value.
 // ─────────────────────────────────────────────────────────────────────
 
@@ -35,23 +41,19 @@ kernel void diffusion_sweep_x(
 
     for (uint s = 0; s < grid.n_substrates; s++) {
         const float coeff = coeffs[s].coeff;  // D * dt / (dx * dx)
-        const float diag  = 1.0f + 2.0f * coeff;
-        const float decay = coeffs[s].decay_coeff;  // 1 / (1 + lambda * dt)
+        const float half_decay = coeffs[s].half_decay;  // 0.5 * lambda * dt
+
+        // LOD tridiagonal diagonals (matching PhysiCell BioFVM_solvers.cpp)
+        const float diag_interior = 1.0f + 2.0f * coeff + half_decay;  // thomas_constant3
+        const float diag_boundary = 1.0f + coeff + half_decay;          // thomas_constant3a
 
         const uint base = s * n_voxels;
         const bool dirichlet = substrates[s].dirichlet_enabled != 0;
         const float target   = substrates[s].target_value;
 
-        // Determine boundary type for x=0 and x=nx-1
-        // Dirichlet on boundary rows (j=0, j=ny-1) and boundary columns (i=0, i=nx-1)
-        bool left_dirichlet  = dirichlet; // x=0 boundary
-        bool right_dirichlet = dirichlet; // x=nx-1 boundary
-
         // Set boundary values if Dirichlet
-        if (left_dirichlet) {
+        if (dirichlet) {
             density[base + j * nx + 0] = target;
-        }
-        if (right_dirichlet) {
             density[base + j * nx + (nx - 1)] = target;
         }
 
@@ -60,31 +62,44 @@ kernel void diffusion_sweep_x(
             continue;
         }
 
+        // Special case: single interior node (nx == 3)
+        if (nx == 3) {
+            uint idx = base + j * nx + 1;
+            float d_i = density[idx];
+
+            // Both neighbors are boundary nodes
+            float b = diag_interior;
+            if (dirichlet) {
+                d_i += coeff * target;  // left boundary contribution
+                d_i += coeff * target;  // right boundary contribution
+            }
+            density[idx] = d_i / b;
+
+            // Re-apply Dirichlet
+            if (dirichlet) {
+                density[base + j * nx + 0] = target;
+                density[base + j * nx + (nx - 1)] = target;
+            }
+            continue;
+        }
+
         // ─── Thomas algorithm for interior nodes i=1..nx-2 ───
         float c_prime[MAX_LINE_LENGTH];
 
-        // i = 1 (first interior node)
+        // i = 1 (first interior node, adjacent to left boundary)
         {
             uint idx = base + j * nx + 1;
             float d_i = density[idx];
-            float a_1 = -coeff;
-            float b_1 = diag;
+            float b_1 = diag_boundary;  // boundary node: only one interior neighbor to the right
             float c_1 = -coeff;
 
             // If left boundary is Dirichlet, fold known value into RHS
-            if (left_dirichlet) {
+            if (dirichlet) {
                 d_i += coeff * target;  // a_1 * target moves to RHS
-                a_1 = 0.0f;  // no coupling to boundary
             }
 
-            float denom = b_1;  // a_1 is 0 for Dirichlet
-            if (!left_dirichlet) {
-                // Neumann fallback: first interior sees reflecting BC
-                denom = b_1;
-            }
-            
-            float c_p = c_1 / denom;
-            float d_p = d_i / denom;
+            float c_p = c_1 / b_1;
+            float d_p = d_i / b_1;
 
             c_prime[1] = c_p;
             density[idx] = d_p;
@@ -96,11 +111,11 @@ kernel void diffusion_sweep_x(
             for (uint i = 2; i < nx - 2; i++) {
                 idx = base + j * nx + i;
                 float a_i = -coeff;
-                float b_i = diag;
+                float b_i = diag_interior;
                 float c_i = -coeff;
                 d_i = density[idx];
 
-                denom = b_i - a_i * c_prev;
+                float denom = b_i - a_i * c_prev;
                 c_prev = c_i / denom;
                 d_prev = (d_i - a_i * d_prev) / denom;
 
@@ -108,20 +123,20 @@ kernel void diffusion_sweep_x(
                 density[idx] = d_prev;
             }
 
-            // i = nx-2 (last interior node)
+            // i = nx-2 (last interior node, adjacent to right boundary)
             {
                 uint last_i = nx - 2;
                 idx = base + j * nx + last_i;
                 float a_last = -coeff;
-                float b_last = diag;
+                float b_last = diag_boundary;  // boundary node: only one interior neighbor to the left
                 d_i = density[idx];
 
                 // If right boundary is Dirichlet, fold known value into RHS
-                if (right_dirichlet) {
-                    d_i += coeff * target;  // c * target moves to RHS
+                if (dirichlet) {
+                    d_i += coeff * target;
                 }
 
-                denom = b_last - a_last * c_prev;
+                float denom = b_last - a_last * c_prev;
                 d_prev = (d_i - a_last * d_prev) / denom;
                 density[idx] = d_prev;
             }
@@ -133,18 +148,9 @@ kernel void diffusion_sweep_x(
             }
         }
 
-        // ─── Apply decay to the entire row for this substrate ───
-        // Decay is applied once per full timestep (in X-sweep only)
-        for (uint i = 0; i < nx; i++) {
-            uint idx = base + j * nx + i;
-            density[idx] *= decay;
-        }
-
-        // Re-apply Dirichlet after decay (boundary values shouldn't decay)
-        if (left_dirichlet) {
+        // Re-apply Dirichlet after solve (ensure boundary values are exact)
+        if (dirichlet) {
             density[base + j * nx + 0] = target;
-        }
-        if (right_dirichlet) {
             density[base + j * nx + (nx - 1)] = target;
         }
     }
@@ -154,7 +160,7 @@ kernel void diffusion_sweep_x(
 // ─────────────────────────────────────────────────────────────────────
 // Y-sweep: 1 thread per x-column
 // Solves the tridiagonal system along y for every substrate in the column.
-// Same Dirichlet BC treatment as X-sweep.
+// Same LOD decay embedding as X-sweep.
 // ─────────────────────────────────────────────────────────────────────
 kernel void diffusion_sweep_y(
     device float*               density         [[buffer(0)]],
@@ -176,44 +182,59 @@ kernel void diffusion_sweep_y(
         float dt = grid.dt;
         float dy = grid.dy;
         float coeff = D * dt / (dy * dy);
-        float diag  = 1.0f + 2.0f * coeff;
+        const float half_decay = coeffs[s].half_decay;  // 0.5 * lambda * dt
+
+        // LOD tridiagonal diagonals (same formulation as X-sweep)
+        const float diag_interior = 1.0f + 2.0f * coeff + half_decay;
+        const float diag_boundary = 1.0f + coeff + half_decay;
 
         const uint base = s * n_voxels;
         const bool dirichlet = substrates[s].dirichlet_enabled != 0;
         const float target   = substrates[s].target_value;
 
-        bool top_dirichlet    = dirichlet; // y=0 boundary
-        bool bottom_dirichlet = dirichlet; // y=ny-1 boundary
-
         // Set boundary values
-        if (top_dirichlet) {
+        if (dirichlet) {
             density[base + 0 * nx + i] = target;
-        }
-        if (bottom_dirichlet) {
             density[base + (ny - 1) * nx + i] = target;
         }
 
         if (ny <= 2) continue;
 
+        // Special case: single interior node (ny == 3)
+        if (ny == 3) {
+            uint idx = base + 1 * nx + i;
+            float d_j = density[idx];
+
+            float b = diag_interior;
+            if (dirichlet) {
+                d_j += coeff * target;
+                d_j += coeff * target;
+            }
+            density[idx] = d_j / b;
+
+            if (dirichlet) {
+                density[base + 0 * nx + i] = target;
+                density[base + (ny - 1) * nx + i] = target;
+            }
+            continue;
+        }
+
         // ─── Thomas algorithm for interior nodes j=1..ny-2 ───
         float c_prime[MAX_LINE_LENGTH];
 
-        // j = 1
+        // j = 1 (first interior node, adjacent to top boundary)
         {
             uint idx = base + 1 * nx + i;
             float d_j = density[idx];
-            float a_1 = -coeff;
-            float b_1 = diag;
+            float b_1 = diag_boundary;
             float c_1 = -coeff;
 
-            if (top_dirichlet) {
+            if (dirichlet) {
                 d_j += coeff * target;
-                a_1 = 0.0f;
             }
 
-            float denom = b_1;
-            float c_p = c_1 / denom;
-            float d_p = d_j / denom;
+            float c_p = c_1 / b_1;
+            float d_p = d_j / b_1;
 
             c_prime[1] = c_p;
             density[idx] = d_p;
@@ -225,11 +246,11 @@ kernel void diffusion_sweep_y(
             for (uint j = 2; j < ny - 2; j++) {
                 idx = base + j * nx + i;
                 float a_j = -coeff;
-                float b_j = diag;
+                float b_j = diag_interior;
                 float c_j = -coeff;
                 d_j = density[idx];
 
-                denom = b_j - a_j * c_prev;
+                float denom = b_j - a_j * c_prev;
                 c_prev = c_j / denom;
                 d_prev = (d_j - a_j * d_prev) / denom;
 
@@ -237,19 +258,19 @@ kernel void diffusion_sweep_y(
                 density[idx] = d_prev;
             }
 
-            // j = ny-2 (last interior node)
+            // j = ny-2 (last interior node, adjacent to bottom boundary)
             {
                 uint last_j = ny - 2;
                 idx = base + last_j * nx + i;
                 float a_last = -coeff;
-                float b_last = diag;
+                float b_last = diag_boundary;
                 d_j = density[idx];
 
-                if (bottom_dirichlet) {
+                if (dirichlet) {
                     d_j += coeff * target;
                 }
 
-                denom = b_last - a_last * c_prev;
+                float denom = b_last - a_last * c_prev;
                 d_prev = (d_j - a_last * d_prev) / denom;
                 density[idx] = d_prev;
             }
@@ -262,13 +283,9 @@ kernel void diffusion_sweep_y(
             }
         }
 
-        // No decay in Y-sweep (already applied in X-sweep)
-
         // Re-apply Dirichlet after solve
-        if (top_dirichlet) {
+        if (dirichlet) {
             density[base + 0 * nx + i] = target;
-        }
-        if (bottom_dirichlet) {
             density[base + (ny - 1) * nx + i] = target;
         }
     }

@@ -15,6 +15,8 @@
 #include "cell_data.h"
 #include "../shaders/types.h"
 
+class CellMechanics;
+
 // ─── Death model codes ───
 static constexpr uint32_t DEATH_NONE      = 0;
 static constexpr uint32_t DEATH_APOPTOSIS = 1;
@@ -39,8 +41,10 @@ static constexpr uint32_t PHASE_KI67_POS = 1;
 
 /// Update phenotype for all alive cells.
 /// Called once per dt_phenotype timestep.
+/// If `mech` is provided, uses GPU spatial hash for efficient interaction lookups.
 void updatePhenotype(CellData& cells, double dt, double current_time,
-                     const float* density, const GridParams& grid);
+                     const float* density, const GridParams& grid,
+                     const CellMechanics* mech = nullptr);
 
 /// Advance the cell cycle for cell i using the full phase-based model.
 /// Supports live, Ki67 basic, Ki67 advanced, flow cytometry, and
@@ -73,11 +77,11 @@ void processSecretion(CellData& cells, float* density,
 uint32_t divideCell(CellData& cells, uint32_t parent_index);
 
 /// Run contact-based cell-cell interactions for cell i.
-/// Scans nearby cells (within interaction distance) and probabilistically
-/// triggers phagocytosis, attack, or fusion. Matches PhysiCell's
-/// standard_cell_cell_interactions().
+/// Uses the GPU spatial hash (via CellMechanics) for efficient neighbor lookup.
+/// Falls back to brute-force if mech is nullptr.
 void standardCellCellInteractions(CellData& cells, uint32_t i, double dt,
-                                   const GridParams& grid);
+                                   const GridParams& grid,
+                                   const CellMechanics* mech = nullptr);
 
 /// Run cell transformations for cell i.
 /// Checks per-type transformation rates and stochastically converts

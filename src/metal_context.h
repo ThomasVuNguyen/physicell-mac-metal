@@ -47,6 +47,17 @@ public:
     void dispatchIntegrate(id<MTLBuffer> cells, id<MTLBuffer> gridParams,
                            float dt, uint32_t numCells, uint32_t maxCells);
 
+    // ─── Unified mechanics pipeline (single command buffer with barriers) ───
+    void dispatchMechanicsPipeline(id<MTLBuffer> cells,
+                                   id<MTLBuffer> hashCounts,
+                                   id<MTLBuffer> hashCells,
+                                   id<MTLBuffer> mechParams,
+                                   id<MTLBuffer> gridParams,
+                                   float dt,
+                                   uint32_t numCells,
+                                   uint32_t maxCells,
+                                   uint32_t numMechVoxels);
+
     // ─── Synchronization ───
     void waitForCompletion();
 

@@ -5,24 +5,8 @@
 
 #include "types.h"
 
-// ─── SoA field offsets within the flat cell buffer ───
-// The cell buffer is laid out as: field[field_index * max_cells + cell_index]
-// Field indices match the CellField enum in types.h
-#define FIELD_POS_X     0
-#define FIELD_POS_Y     1
-#define FIELD_POS_Z     2
-#define FIELD_VEL_X     3
-#define FIELD_VEL_Y     4
-#define FIELD_VEL_Z     5
-#define FIELD_PREV_VX   6
-#define FIELD_PREV_VY   7
-#define FIELD_PREV_VZ   8
-#define FIELD_RAD       9
-#define FIELD_REPULSION 13
-#define FIELD_ADHESION  14
-#define FIELD_REL_MAX_ADH_DIST 15
-#define FIELD_SIMPLE_PRESSURE 22
-#define FIELD_MECH_VOXEL 27  // uint32: 23 floats + 4 preceding uints (cell_type, current_phase, is_alive, voxel_index)
+// ─── SoA field offsets from shared types.h ───
+// Use the CELL_FIELD_* defines from types.h — single source of truth.
 
 // Helper to read/write from SoA cell buffer
 #ifndef CELL_SOA_HELPERS
@@ -67,9 +51,9 @@ kernel void build_spatial_hash(
 {
     if (tid >= num_cells) return;
 
-    float px = cell_read(cells, FIELD_POS_X, tid, max_cells);
-    float py = cell_read(cells, FIELD_POS_Y, tid, max_cells);
-    float pz = cell_read(cells, FIELD_POS_Z, tid, max_cells);
+    float px = cell_read(cells, CELL_FIELD_POS_X, tid, max_cells);
+    float py = cell_read(cells, CELL_FIELD_POS_Y, tid, max_cells);
+    float pz = cell_read(cells, CELL_FIELD_POS_Z, tid, max_cells);
 
     float voxel_size = mech.mechanics_voxel_size;
 
@@ -89,7 +73,7 @@ kernel void build_spatial_hash(
 
     // Store the mechanics voxel index back into the cell data
     // Using as_type to store uint as float bits
-    cell_write(cells, FIELD_MECH_VOXEL, tid, max_cells, as_type<float>(voxel_index));
+    cell_write(cells, CELL_FIELD_MECH_VOXEL, tid, max_cells, as_type<float>(voxel_index));
 
     // Atomic increment to get a slot in the hash bucket
     uint slot = atomic_fetch_add_explicit(&hash_counts[voxel_index], 1, memory_order_relaxed);
@@ -116,16 +100,16 @@ kernel void compute_forces(
 {
     if (tid >= num_cells) return;
 
-    float px = cell_read(cells, FIELD_POS_X, tid, max_cells);
-    float py = cell_read(cells, FIELD_POS_Y, tid, max_cells);
-    float pz = cell_read(cells, FIELD_POS_Z, tid, max_cells);
-    float radius_i = cell_read(cells, FIELD_RAD, tid, max_cells);
-    float rep_i = cell_read(cells, FIELD_REPULSION, tid, max_cells);
-    float adh_i = cell_read(cells, FIELD_ADHESION, tid, max_cells);
-    float rel_max_adh = cell_read(cells, FIELD_REL_MAX_ADH_DIST, tid, max_cells);
+    float px = cell_read(cells, CELL_FIELD_POS_X, tid, max_cells);
+    float py = cell_read(cells, CELL_FIELD_POS_Y, tid, max_cells);
+    float pz = cell_read(cells, CELL_FIELD_POS_Z, tid, max_cells);
+    float radius_i = cell_read(cells, CELL_FIELD_RADIUS, tid, max_cells);
+    float rep_i = cell_read(cells, CELL_FIELD_REPULSION, tid, max_cells);
+    float adh_i = cell_read(cells, CELL_FIELD_ADHESION, tid, max_cells);
+    float rel_max_adh = cell_read(cells, CELL_FIELD_REL_MAX_ADH, tid, max_cells);
 
     // Read mechanics voxel index
-    uint my_voxel = as_type<uint>(cell_read(cells, FIELD_MECH_VOXEL, tid, max_cells));
+    uint my_voxel = as_type<uint>(cell_read(cells, CELL_FIELD_MECH_VOXEL, tid, max_cells));
 
     float max_dist = mech.max_interaction_distance;
 
@@ -168,9 +152,9 @@ kernel void compute_forces(
                     uint other = hash_cells[neighbor_voxel * MAX_CELLS_PER_VOXEL + s];
                     if (other == tid) continue;  // skip self
 
-                    float ox = cell_read(cells, FIELD_POS_X, other, max_cells);
-                    float oy = cell_read(cells, FIELD_POS_Y, other, max_cells);
-                    float oz = cell_read(cells, FIELD_POS_Z, other, max_cells);
+                    float ox = cell_read(cells, CELL_FIELD_POS_X, other, max_cells);
+                    float oy = cell_read(cells, CELL_FIELD_POS_Y, other, max_cells);
+                    float oz = cell_read(cells, CELL_FIELD_POS_Z, other, max_cells);
 
                     float ddx = px - ox;
                     float ddy = py - oy;
@@ -188,14 +172,14 @@ kernel void compute_forces(
                     float ny = ddy * inv_dist;
                     float nz = ddz * inv_dist;
 
-                    float radius_j = cell_read(cells, FIELD_RAD, other, max_cells);
+                    float radius_j = cell_read(cells, CELL_FIELD_RADIUS, other, max_cells);
                     float R_sum = radius_i + radius_j;
 
                     float force_mag = 0.0f;
 
                     // ─── Repulsion: if overlapping (dist < R_sum) ───
                     if (dist < R_sum) {
-                        float rep_j = cell_read(cells, FIELD_REPULSION, other, max_cells);
+                        float rep_j = cell_read(cells, CELL_FIELD_REPULSION, other, max_cells);
                         float overlap = 1.0f - dist / R_sum;
                         force_mag += overlap * overlap * sqrt(rep_i * rep_j);
 
@@ -208,7 +192,7 @@ kernel void compute_forces(
                     // ─── Adhesion: attractive force ───
                     float adhesion_distance = rel_max_adh * R_sum;
                     if (dist < adhesion_distance) {
-                        float adh_j = cell_read(cells, FIELD_ADHESION, other, max_cells);
+                        float adh_j = cell_read(cells, CELL_FIELD_ADHESION, other, max_cells);
                         float t = 1.0f - dist / adhesion_distance;
                         force_mag -= t * t * sqrt(adh_i * adh_j);
                     }
@@ -223,10 +207,10 @@ kernel void compute_forces(
 
     // Write accumulated force into velocity
     // (mechanics dt scaling is applied during integration)
-    cell_write(cells, FIELD_VEL_X, tid, max_cells, fx);
-    cell_write(cells, FIELD_VEL_Y, tid, max_cells, fy);
-    cell_write(cells, FIELD_VEL_Z, tid, max_cells, fz);
+    cell_write(cells, CELL_FIELD_VEL_X, tid, max_cells, fx);
+    cell_write(cells, CELL_FIELD_VEL_Y, tid, max_cells, fy);
+    cell_write(cells, CELL_FIELD_VEL_Z, tid, max_cells, fz);
 
     // Write accumulated simple_pressure
-    cell_write(cells, FIELD_SIMPLE_PRESSURE, tid, max_cells, local_pressure);
+    cell_write(cells, CELL_FIELD_PRESSURE, tid, max_cells, local_pressure);
 }

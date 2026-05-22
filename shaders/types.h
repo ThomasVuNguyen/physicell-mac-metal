@@ -64,63 +64,74 @@ struct MechanicsParams {
 // ─── Thomas algorithm precomputed coefficients ───
 struct ThomasCoeffs {
     float coeff;        // D * dt / (dx * dx)  for the tridiagonal
-    float decay_coeff;  // 1.0 / (1.0 + decay_rate * dt)
+    float half_decay;   // 0.5 * decay_rate * dt  (LOD splitting: decay shared equally between X and Y sweeps)
     float _pad[2];
 };
 
-// ─── Cell SoA field indices (enum for clarity) ───
-// Each field is a separate contiguous array of size max_cells
+// ─── Cell SoA field indices ───
+// Shared between CPU (C++) and GPU (Metal) — single source of truth.
+// Each field is a separate contiguous array of size max_cells.
+#define CELL_FIELD_POS_X        0
+#define CELL_FIELD_POS_Y        1
+#define CELL_FIELD_POS_Z        2
+#define CELL_FIELD_VEL_X        3
+#define CELL_FIELD_VEL_Y        4
+#define CELL_FIELD_VEL_Z        5
+#define CELL_FIELD_PREV_VX      6
+#define CELL_FIELD_PREV_VY      7
+#define CELL_FIELD_PREV_VZ      8
+#define CELL_FIELD_RADIUS       9
+#define CELL_FIELD_NUCLEAR_RAD  10
+#define CELL_FIELD_TOTAL_VOL    11
+#define CELL_FIELD_NUCLEAR_VOL  12
+#define CELL_FIELD_REPULSION    13
+#define CELL_FIELD_ADHESION     14
+#define CELL_FIELD_REL_MAX_ADH  15
+#define CELL_FIELD_MOT_SPEED    16
+#define CELL_FIELD_MOT_BIAS     17
+#define CELL_FIELD_MOT_DIR_X    18
+#define CELL_FIELD_MOT_DIR_Y    19
+#define CELL_FIELD_MOT_DIR_Z    20
+#define CELL_FIELD_ONCOPROTEIN  21
+#define CELL_FIELD_PRESSURE     22
+#define CELL_FIELD_CELL_TYPE    23
+#define CELL_FIELD_CUR_PHASE    24
+#define CELL_FIELD_IS_ALIVE     25
+#define CELL_FIELD_VOXEL_IDX    26
+#define CELL_FIELD_MECH_VOXEL   27
+#define NUM_CELL_FIELDS         28
+
+// CPU-only convenience enum (aliases the defines above)
 #ifndef __METAL_VERSION__
 enum CellField {
-    // Positions (float32, GPU-writable)
-    FIELD_POSITION_X = 0,
-    FIELD_POSITION_Y,
-    FIELD_POSITION_Z,
-
-    // Velocities (float32, GPU-writable)
-    FIELD_VELOCITY_X,
-    FIELD_VELOCITY_Y,
-    FIELD_VELOCITY_Z,
-
-    // Previous velocities for Adams-Bashforth (float32, GPU-writable)
-    FIELD_PREV_VELOCITY_X,
-    FIELD_PREV_VELOCITY_Y,
-    FIELD_PREV_VELOCITY_Z,
-
-    // Cell properties (float32, CPU-writable, GPU-readable)
-    FIELD_RADIUS,
-    FIELD_NUCLEAR_RADIUS,
-    FIELD_TOTAL_VOLUME,
-    FIELD_NUCLEAR_VOLUME,
-
-    // Mechanics (float32, CPU-writable)
-    FIELD_CELL_CELL_REPULSION,
-    FIELD_CELL_CELL_ADHESION,
-    FIELD_RELATIVE_MAX_ADHESION_DISTANCE,
-
-    // Motility (float32, CPU-writable)
-    FIELD_MOTILITY_SPEED,
-    FIELD_MOTILITY_BIAS,
-    FIELD_MOTILITY_DIR_X,
-    FIELD_MOTILITY_DIR_Y,
-    FIELD_MOTILITY_DIR_Z,
-
-    // Custom data
-    FIELD_ONCOPROTEIN,
-
-    // Contact pressure (GPU-computed)
-    FIELD_SIMPLE_PRESSURE,
-
-    // Integer fields
-    FIELD_CELL_TYPE,
-    FIELD_CURRENT_PHASE,
-    FIELD_IS_ALIVE,
-
-    // Voxel indices (uint32, GPU-writable)
-    FIELD_VOXEL_INDEX,          // microenvironment voxel
-    FIELD_MECH_VOXEL_INDEX,     // mechanics grid voxel
-
-    NUM_CELL_FIELDS
+    FIELD_POSITION_X = CELL_FIELD_POS_X,
+    FIELD_POSITION_Y = CELL_FIELD_POS_Y,
+    FIELD_POSITION_Z = CELL_FIELD_POS_Z,
+    FIELD_VELOCITY_X = CELL_FIELD_VEL_X,
+    FIELD_VELOCITY_Y = CELL_FIELD_VEL_Y,
+    FIELD_VELOCITY_Z = CELL_FIELD_VEL_Z,
+    FIELD_PREV_VELOCITY_X = CELL_FIELD_PREV_VX,
+    FIELD_PREV_VELOCITY_Y = CELL_FIELD_PREV_VY,
+    FIELD_PREV_VELOCITY_Z = CELL_FIELD_PREV_VZ,
+    FIELD_RADIUS = CELL_FIELD_RADIUS,
+    FIELD_NUCLEAR_RADIUS = CELL_FIELD_NUCLEAR_RAD,
+    FIELD_TOTAL_VOLUME = CELL_FIELD_TOTAL_VOL,
+    FIELD_NUCLEAR_VOLUME = CELL_FIELD_NUCLEAR_VOL,
+    FIELD_CELL_CELL_REPULSION = CELL_FIELD_REPULSION,
+    FIELD_CELL_CELL_ADHESION = CELL_FIELD_ADHESION,
+    FIELD_RELATIVE_MAX_ADHESION_DISTANCE = CELL_FIELD_REL_MAX_ADH,
+    FIELD_MOTILITY_SPEED = CELL_FIELD_MOT_SPEED,
+    FIELD_MOTILITY_BIAS = CELL_FIELD_MOT_BIAS,
+    FIELD_MOTILITY_DIR_X = CELL_FIELD_MOT_DIR_X,
+    FIELD_MOTILITY_DIR_Y = CELL_FIELD_MOT_DIR_Y,
+    FIELD_MOTILITY_DIR_Z = CELL_FIELD_MOT_DIR_Z,
+    FIELD_ONCOPROTEIN = CELL_FIELD_ONCOPROTEIN,
+    FIELD_SIMPLE_PRESSURE = CELL_FIELD_PRESSURE,
+    FIELD_CELL_TYPE = CELL_FIELD_CELL_TYPE,
+    FIELD_CURRENT_PHASE = CELL_FIELD_CUR_PHASE,
+    FIELD_IS_ALIVE = CELL_FIELD_IS_ALIVE,
+    FIELD_VOXEL_INDEX = CELL_FIELD_VOXEL_IDX,
+    FIELD_MECH_VOXEL_INDEX = CELL_FIELD_MECH_VOXEL
 };
 #endif
 

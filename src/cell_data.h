@@ -85,6 +85,7 @@ public:
     double* target_fluid_fraction;
     double* rupture_volume;               // absolute volume at which cell ruptures
     double* relative_rupture_volume;      // ratio to initial volume at time of death
+    double* target_cyto_to_nuclear_ratio; // PhysiCell: target_solid_cyto = ratio * target_solid_nuclear (dynamic)
 
     // ── Death fields ──
     double* necrosis_rate;                // rate for necrosis check (1/min)
@@ -140,6 +141,7 @@ public:
     float* attack_rates;                  // attack rate toward each cell type
     float* fusion_rates;                  // fusion rate toward each cell type
     float* transformation_rates;          // transformation rate to each cell type
+    float* immunogenicities;              // immunogenicity to each attacker type (PhysiCell: target.immunogenicity(attacker_type))
     uint32_t num_cell_types;              // number of registered cell types
 
     // Per-cell per-substrate arrays (size = max_cells * n_substrates)

@@ -1,0 +1,26 @@
+{
+    "name": "heterogeneity_short",
+    "description": "Default heterogeneity sample, 5 simulated minutes, deterministic single-thread.",
+    "base_config": "../../../PhysiCell/config/PhysiCell_settings.xml",
+    "ref_binary": "../../../PhysiCell/heterogeneity",
+    "ref_project_root": "../../../PhysiCell",
+    "metal_binary": "../../build/physicell-metal",
+    "metal_project_root": "../..",
+    "overrides": {
+        "max_time": 5,
+        "save_interval": 1,
+        "omp_num_threads": 1,
+        "random_seed": 0
+    },
+    "tolerances": {
+        "position": 1.0,
+        "volume": 50.0,
+        "phase": 0,
+        "substrate_linf": 1.0,
+        "substrate_rmse": 0.5,
+        "voxel_coord": 1.0,
+        "cell_count_abs": 0
+    },
+    "timeout_sec": 600,
+    "fail_on_count_drift": false
+}

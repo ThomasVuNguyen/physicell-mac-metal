@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <mach/mach_time.h>
+#import <dispatch/dispatch.h>
 #import <cstdio>
 #import <cstdlib>
 #import <cmath>
@@ -347,13 +348,18 @@ int main(int argc, const char* argv[]) {
 
                 // Cell secretion/uptake — runs at diffusion_dt per PhysiCell
                 // (PhysiCell calls secretion.advance() every diffusion timestep)
+                // Parallelized via GCD dispatch_apply on Apple Silicon P-cores
                 {
                     float* dens = microenv.densityBuffer();
                     GridParams gp = microenv.getGridParams();
-                    for (uint32_t ci = 0; ci < cells.num_cells; ci++) {
-                        if (cells.current_death_model[ci] != 0) continue; // skip dead
-                        processSecretion(cells, dens, gp, ci, dt_diffusion);
-                    }
+                    uint32_t n = cells.num_cells;
+                    // Capture by value for block safety
+                    CellData* cells_ptr = &cells;
+                    dispatch_apply(n, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                        ^(size_t ci) {
+                            if (cells_ptr->current_death_model[ci] != 0) return; // skip dead
+                            processSecretion(*cells_ptr, dens, gp, (uint32_t)ci, dt_diffusion);
+                        });
                 }
 
                 // Compute gradients for chemotaxis (CPU-side)
@@ -368,6 +374,8 @@ int main(int argc, const char* argv[]) {
                 double t0 = wallTime();
                 mechanics.update(cells, (float)dt_mechanics);
                 metal.waitForCompletion();
+                // Cache CPU pointers into GPU spatial hash (zero-copy on UMA)
+                mechanics.syncHashPointers();
                 t_mechanics_total += wallTime() - t0;
                 mechanics_steps++;
                 mech_accumulator = 0.0;
@@ -391,7 +399,8 @@ int main(int argc, const char* argv[]) {
                 updateAttachmentForces(cells, dt_phenotype);
 
                 updatePhenotype(cells, dt_phenotype, current_time,
-                                microenv.densityBuffer(), microenv.getGridParams());
+                                microenv.densityBuffer(), microenv.getGridParams(),
+                                &mechanics);
                 t_phenotype_total += wallTime() - t0;
                 phenotype_steps++;
                 pheno_accumulator = 0.0;

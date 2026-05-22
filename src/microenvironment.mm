@@ -88,7 +88,7 @@ void Microenvironment::initialize(const SimConfig& config, MetalContext* ctx) {
         float lambda = config.substrates[s].decay_rate;
         float dt = config.dt_diffusion;
         tc[s].coeff = D * dt / (grid_.dx * grid_.dx);  // note: will be recalculated per-axis in shader
-        tc[s].decay_coeff = 1.0f / (1.0f + lambda * dt);
+        tc[s].half_decay = 0.5f * lambda * dt;  // LOD splitting: decay shared equally between X and Y sweeps
     }
 
     printf("  Microenvironment: %u x %u x %u voxels, %u substrates\n",

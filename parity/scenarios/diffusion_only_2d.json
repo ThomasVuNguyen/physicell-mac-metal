@@ -1,0 +1,27 @@
+{
+    "name": "diffusion_only_2d",
+    "description": "Uniform 38 mmHg field with Dirichlet boundary, no cells. Tests LOD Thomas solver alone.",
+    "_note": "Needs a generic PhysiCell binary (the 'template' sample project, built from PhysiCell/sample_projects/template). The bundled 'heterogeneity' binary has cancer-cell logic baked in and crashes on configs without it. If template binary is missing this scenario is SKIPPED rather than failed.",
+    "base_config": "./diffusion_only_2d.xml",
+    "ref_binary": "../../../PhysiCell/template",
+    "ref_project_root": "../../../PhysiCell",
+    "metal_binary": "../../build/physicell-metal",
+    "metal_project_root": "../..",
+    "overrides": {
+        "max_time": 2,
+        "save_interval": 1,
+        "omp_num_threads": 1,
+        "random_seed": 0
+    },
+    "tolerances": {
+        "position": 1e-3,
+        "volume": 1e-1,
+        "phase": 0,
+        "substrate_linf": 1e-4,
+        "substrate_rmse": 1e-5,
+        "voxel_coord": 1e-6,
+        "cell_count_abs": 0
+    },
+    "timeout_sec": 120,
+    "fail_on_count_drift": true
+}

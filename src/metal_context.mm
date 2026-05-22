@@ -399,3 +399,83 @@ void MetalContext::waitForCompletion() {
         lastCommandBuffer = nil;
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Unified mechanics pipeline — single command buffer with barriers
+// Encodes: clear_hash → barrier → build_hash → barrier → forces → barrier → integrate
+// This guarantees correct execution order on the GPU.
+// ─────────────────────────────────────────────────────────────────────
+void MetalContext::dispatchMechanicsPipeline(id<MTLBuffer> cells,
+                                              id<MTLBuffer> hashCounts,
+                                              id<MTLBuffer> hashCells,
+                                              id<MTLBuffer> mechParams,
+                                              id<MTLBuffer> gridParams,
+                                              float dt,
+                                              uint32_t numCells,
+                                              uint32_t maxCells,
+                                              uint32_t numMechVoxels) {
+    id<MTLCommandBuffer> cmdBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+    // ─── 1. Clear spatial hash ───
+    [encoder setComputePipelineState:clearHashPipeline];
+    [encoder setBuffer:hashCounts offset:0 atIndex:0];
+    [encoder setBytes:&numMechVoxels length:sizeof(uint32_t) atIndex:1];
+
+    MTLSize gridSize = MTLSizeMake(numMechVoxels, 1, 1);
+    MTLSize tgSize = optimalThreadgroupSize(clearHashPipeline, numMechVoxels);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    // Memory barrier: ensure clear completes before build reads
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // ─── 2. Build spatial hash ───
+    [encoder setComputePipelineState:buildHashPipeline];
+    [encoder setBuffer:cells      offset:0 atIndex:0];
+    [encoder setBuffer:hashCounts offset:0 atIndex:1];
+    [encoder setBuffer:hashCells  offset:0 atIndex:2];
+    [encoder setBuffer:mechParams offset:0 atIndex:3];
+    [encoder setBuffer:gridParams offset:0 atIndex:4];
+    [encoder setBytes:&numCells   length:sizeof(uint32_t) atIndex:5];
+    [encoder setBytes:&maxCells   length:sizeof(uint32_t) atIndex:6];
+
+    gridSize = MTLSizeMake(numCells, 1, 1);
+    tgSize = optimalThreadgroupSize(buildHashPipeline, numCells);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    // Memory barrier: ensure hash is fully built before force computation reads it
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // ─── 3. Compute forces ───
+    [encoder setComputePipelineState:forcesPipeline];
+    [encoder setBuffer:cells      offset:0 atIndex:0];
+    [encoder setBuffer:hashCounts offset:0 atIndex:1];
+    [encoder setBuffer:hashCells  offset:0 atIndex:2];
+    [encoder setBuffer:mechParams offset:0 atIndex:3];
+    [encoder setBytes:&numCells   length:sizeof(uint32_t) atIndex:4];
+    [encoder setBytes:&maxCells   length:sizeof(uint32_t) atIndex:5];
+
+    gridSize = MTLSizeMake(numCells, 1, 1);
+    tgSize = optimalThreadgroupSize(forcesPipeline, numCells);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    // Memory barrier: ensure forces are written before integration reads them
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // ─── 4. Integrate positions ───
+    [encoder setComputePipelineState:integratePipeline];
+    [encoder setBuffer:cells      offset:0 atIndex:0];
+    [encoder setBuffer:gridParams offset:0 atIndex:1];
+    [encoder setBytes:&dt         length:sizeof(float)    atIndex:2];
+    [encoder setBytes:&numCells   length:sizeof(uint32_t) atIndex:3];
+    [encoder setBytes:&maxCells   length:sizeof(uint32_t) atIndex:4];
+
+    gridSize = MTLSizeMake(numCells, 1, 1);
+    tgSize = optimalThreadgroupSize(integratePipeline, numCells);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    [encoder endEncoding];
+    [cmdBuffer commit];
+
+    lastCommandBuffer = cmdBuffer;
+}

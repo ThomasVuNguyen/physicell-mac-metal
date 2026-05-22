@@ -69,6 +69,11 @@ void CellMechanics::initialize(const SimConfig& config, MetalContext* ctx) {
     grid_params_buffer_ = (__bridge_retained void*)gpBuf;
     memcpy([gpBuf contents], &gp, sizeof(GridParams));
 
+    // Cache grid origin for CPU-side voxel index computation
+    grid_origin_x_ = config.x_min;
+    grid_origin_y_ = config.y_min;
+    grid_origin_z_ = config.z_min;
+
     printf("  Mechanics grid: %u x %u x %u voxels (%.0f µm)\n",
            params_.mech_grid_nx, params_.mech_grid_ny, params_.mech_grid_nz,
            mech_voxel_size);
@@ -79,41 +84,27 @@ void CellMechanics::initialize(const SimConfig& config, MetalContext* ctx) {
 void CellMechanics::update(CellData& cells, float dt) {
     if (cells.num_cells == 0) return;
 
-    clearSpatialHash();
-    buildSpatialHash(cells);
-    computeForces(cells);
-    integratePositions(cells, dt);
-}
-
-void CellMechanics::clearSpatialHash() {
-    id<MTLBuffer> hcBuf = (__bridge id<MTLBuffer>)hash_counts_buffer_;
-    metal_ctx_->dispatchClearHash(hcBuf, total_mech_voxels_);
-}
-
-void CellMechanics::buildSpatialHash(CellData& cells) {
     id<MTLBuffer> gpuBuf = (__bridge id<MTLBuffer>)(cells.gpu_buffer);
     id<MTLBuffer> hcBuf = (__bridge id<MTLBuffer>)hash_counts_buffer_;
     id<MTLBuffer> hcellBuf = (__bridge id<MTLBuffer>)hash_cells_buffer_;
     id<MTLBuffer> mpBuf = (__bridge id<MTLBuffer>)mech_params_buffer_;
     id<MTLBuffer> gpBuf = (__bridge id<MTLBuffer>)grid_params_buffer_;
 
-    metal_ctx_->dispatchBuildHash(gpuBuf, hcBuf, hcellBuf, mpBuf, gpBuf,
-                                  cells.num_cells, cells.max_cells);
+    // Single command buffer with memory barriers between each kernel
+    metal_ctx_->dispatchMechanicsPipeline(gpuBuf, hcBuf, hcellBuf, mpBuf, gpBuf,
+                                          dt, cells.num_cells, cells.max_cells,
+                                          total_mech_voxels_);
 }
 
-void CellMechanics::computeForces(CellData& cells) {
-    id<MTLBuffer> gpuBuf = (__bridge id<MTLBuffer>)(cells.gpu_buffer);
-    id<MTLBuffer> hcBuf = (__bridge id<MTLBuffer>)hash_counts_buffer_;
-    id<MTLBuffer> hcellBuf = (__bridge id<MTLBuffer>)hash_cells_buffer_;
-    id<MTLBuffer> mpBuf = (__bridge id<MTLBuffer>)mech_params_buffer_;
-
-    metal_ctx_->dispatchForces(gpuBuf, hcBuf, hcellBuf, mpBuf,
-                               cells.num_cells, cells.max_cells);
-}
-
-void CellMechanics::integratePositions(CellData& cells, float dt) {
-    id<MTLBuffer> gpuBuf = (__bridge id<MTLBuffer>)(cells.gpu_buffer);
-    id<MTLBuffer> gpBuf = (__bridge id<MTLBuffer>)grid_params_buffer_;
-
-    metal_ctx_->dispatchIntegrate(gpuBuf, gpBuf, dt, cells.num_cells, cells.max_cells);
+void CellMechanics::syncHashPointers() {
+    // On Apple Silicon UMA, Metal shared buffers are directly CPU-readable.
+    // Cache the raw pointers for efficient CPU-side neighbor lookups.
+    if (hash_counts_buffer_) {
+        id<MTLBuffer> hcBuf = (__bridge id<MTLBuffer>)hash_counts_buffer_;
+        hash_counts_ptr_ = static_cast<const uint32_t*>([hcBuf contents]);
+    }
+    if (hash_cells_buffer_) {
+        id<MTLBuffer> hcellBuf = (__bridge id<MTLBuffer>)hash_cells_buffer_;
+        hash_cells_ptr_ = static_cast<const uint32_t*>([hcellBuf contents]);
+    }
 }
