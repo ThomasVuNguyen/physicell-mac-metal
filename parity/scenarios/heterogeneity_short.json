@@ -13,14 +13,14 @@
         "random_seed": 0
     },
     "tolerances": {
-        "position": 1.0,
-        "volume": 50.0,
+        "position": 0.1,
+        "volume": 5.0,
         "phase": 0,
-        "substrate_linf": 1.0,
-        "substrate_rmse": 0.5,
-        "voxel_coord": 1.0,
+        "substrate_linf": 0.1,
+        "substrate_rmse": 0.05,
+        "voxel_coord": 0.01,
         "cell_count_abs": 0
     },
     "timeout_sec": 600,
-    "fail_on_count_drift": false
+    "fail_on_count_drift": true
 }

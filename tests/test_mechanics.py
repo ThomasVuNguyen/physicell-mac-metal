@@ -233,26 +233,35 @@ def test_force_formula_matches_physicell(ctx):
 # Test 16: Cell mechanics uses unified dispatch (not 4 separate buffers)
 # ─────────────────────────────────────────────────────────────────────
 def test_cell_mechanics_uses_unified_dispatch(ctx):
-    """Verify cell_mechanics.mm calls dispatchMechanicsPipeline instead of 4 separate calls."""
+    """Verify cell_mechanics.mm uses batched GPU dispatch, not 4 separate single-kernel buffers.
+
+    After the motility fix, mechanics uses two batched dispatches:
+      computeForces()        → dispatchForcesOnlyPipeline  (clear+build+forces in one buffer)
+      integratePositions()   → dispatchIntegrate           (after CPU motility is applied)
+    Forces must still share one command buffer (with memory barriers) to guarantee
+    correct spatial-hash state when compute_forces reads it.
+    """
     project_dir = ctx.get("project_dir", os.path.dirname(os.path.dirname(__file__)))
     mm_path = os.path.join(project_dir, "src", "cell_mechanics.mm")
 
     with open(mm_path, "r") as f:
         source = f.read()
 
-    assert "dispatchMechanicsPipeline" in source, (
-        "cell_mechanics.mm should call dispatchMechanicsPipeline"
+    # Must use the forces-only or full unified pipeline (not 4 separate command buffers)
+    assert ("dispatchForcesOnlyPipeline" in source or "dispatchMechanicsPipeline" in source), (
+        "cell_mechanics.mm should call dispatchForcesOnlyPipeline or dispatchMechanicsPipeline"
     )
 
-    # Should NOT have separate dispatch calls
+    # Should NOT bypass batching by calling the fine-grained individual dispatchers
     assert "dispatchClearHash" not in source, (
         "cell_mechanics.mm should not call dispatchClearHash separately"
     )
     assert "dispatchBuildHash" not in source, (
         "cell_mechanics.mm should not call dispatchBuildHash separately"
     )
-    assert "dispatchForces" not in source, (
-        "cell_mechanics.mm should not call dispatchForces separately"
+    # Check for the exact individual forces dispatch (not the pipeline variant)
+    assert "->dispatchForces(" not in source, (
+        "cell_mechanics.mm should not call dispatchForces() individually"
     )
 
     return True, "Uses unified dispatchMechanicsPipeline"

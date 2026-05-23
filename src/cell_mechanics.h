@@ -23,6 +23,13 @@ public:
     // Uses a single Metal command buffer with memory barriers between kernels.
     void update(CellData& cells, float dt);
 
+    // Split mechanics — use these when CPU motility must run between forces and integrate:
+    //   computeForces(...)   → dispatch clear_hash + build_hash + compute_forces
+    //   (caller: metal.waitForCompletion(), syncHashPointers(), updateMotility())
+    //   integratePositions() → dispatch integrate_positions
+    void computeForces(CellData& cells, float dt);
+    void integratePositions(CellData& cells, float dt);
+
     // Accessors for spatial hash (CPU-side neighbor lookups in cell interactions)
     uint32_t totalMechVoxels() const { return total_mech_voxels_; }
     const MechanicsParams& params() const { return params_; }

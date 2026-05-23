@@ -58,6 +58,17 @@ public:
                                    uint32_t maxCells,
                                    uint32_t numMechVoxels);
 
+    // ─── Split mechanics pipeline: forces-only (no integrate) ───
+    // Use this when CPU motility must run between forces and integrate_positions.
+    void dispatchForcesOnlyPipeline(id<MTLBuffer> cells,
+                                     id<MTLBuffer> hashCounts,
+                                     id<MTLBuffer> hashCells,
+                                     id<MTLBuffer> mechParams,
+                                     id<MTLBuffer> gridParams,
+                                     uint32_t numCells,
+                                     uint32_t maxCells,
+                                     uint32_t numMechVoxels);
+
     // ─── Synchronization ───
     void waitForCompletion();
 

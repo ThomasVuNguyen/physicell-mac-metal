@@ -96,6 +96,29 @@ void CellMechanics::update(CellData& cells, float dt) {
                                           total_mech_voxels_);
 }
 
+void CellMechanics::computeForces(CellData& cells, float dt) {
+    if (cells.num_cells == 0) return;
+
+    id<MTLBuffer> gpuBuf   = (__bridge id<MTLBuffer>)(cells.gpu_buffer);
+    id<MTLBuffer> hcBuf    = (__bridge id<MTLBuffer>)hash_counts_buffer_;
+    id<MTLBuffer> hcellBuf = (__bridge id<MTLBuffer>)hash_cells_buffer_;
+    id<MTLBuffer> mpBuf    = (__bridge id<MTLBuffer>)mech_params_buffer_;
+    id<MTLBuffer> gpBuf    = (__bridge id<MTLBuffer>)grid_params_buffer_;
+
+    metal_ctx_->dispatchForcesOnlyPipeline(gpuBuf, hcBuf, hcellBuf, mpBuf, gpBuf,
+                                            cells.num_cells, cells.max_cells,
+                                            total_mech_voxels_);
+}
+
+void CellMechanics::integratePositions(CellData& cells, float dt) {
+    if (cells.num_cells == 0) return;
+
+    id<MTLBuffer> gpuBuf = (__bridge id<MTLBuffer>)(cells.gpu_buffer);
+    id<MTLBuffer> gpBuf  = (__bridge id<MTLBuffer>)grid_params_buffer_;
+
+    metal_ctx_->dispatchIntegrate(gpuBuf, gpBuf, dt, cells.num_cells, cells.max_cells);
+}
+
 void CellMechanics::syncHashPointers() {
     // On Apple Silicon UMA, Metal shared buffers are directly CPU-readable.
     // Cache the raw pointers for efficient CPU-side neighbor lookups.

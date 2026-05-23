@@ -26,11 +26,27 @@ BINARY = os.path.join(PROJECT_DIR, "build", "physicell-metal")
 ORIGINAL_DIR = os.path.join(os.path.dirname(PROJECT_DIR), "PhysiCell")
 
 UNIT_MODULES = [
+    # Analytical / pure-Python (no binary needed)
+    "test_volume_ode",
+    "test_hill_function",
+    "test_secretion",
+    # Binary readback (spawn binary, read .mat output)
+    "test_diffusion_readback",
+    "test_cycle_death",
+    "test_motility",
+    "test_config",
+    "test_secretion_binary",
+    "test_necrosis",
+    "test_chemotaxis",
+    "test_ki67",
+    "test_csv_placement",
+    "test_3d",
+    "test_multitype",
+    # Legacy source-inspection tests (weak but kept for coverage)
     "test_diffusion",
     "test_mechanics",
     "test_phenotype",
     "test_interactions",
-    "test_secretion",
 ]
 
 E2E_MODULES = [

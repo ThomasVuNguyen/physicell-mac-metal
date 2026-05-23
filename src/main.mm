@@ -368,14 +368,23 @@ int main(int argc, const char* argv[]) {
                 diffusion_steps++;
             }
 
-            // ── GPU: Mechanics (at mechanics_dt interval) ──
+            // ── GPU+CPU: Mechanics (at mechanics_dt interval) ──
+            // Order: forces (GPU) → motility (CPU) → integrate (GPU)
+            // This matches PhysiCell's update_velocity() + update_position() order,
+            // ensuring motility velocity is present when integrate_positions runs.
             mech_accumulator += dt_diffusion;
             if (mech_accumulator >= dt_mechanics - 0.5 * dt_diffusion) {
                 double t0 = wallTime();
-                mechanics.update(cells, (float)dt_mechanics);
+                // Phase 1: spatial hash + mechanical forces (GPU)
+                mechanics.computeForces(cells, (float)dt_mechanics);
                 metal.waitForCompletion();
-                // Cache CPU pointers into GPU spatial hash (zero-copy on UMA)
                 mechanics.syncHashPointers();
+                // Phase 2: motility vector added to velocity (CPU, every mechanics step)
+                updateMotility(cells, motility, microenv.densityBuffer(),
+                               microenv.getGridParams(), dt_mechanics);
+                // Phase 3: position integration (GPU, reads forces + motility velocity)
+                mechanics.integratePositions(cells, (float)dt_mechanics);
+                metal.waitForCompletion();
                 t_mechanics_total += wallTime() - t0;
                 mechanics_steps++;
                 mech_accumulator = 0.0;
@@ -389,10 +398,6 @@ int main(int argc, const char* argv[]) {
                 // Apply rules engine (modifies cell behaviors based on signals)
                 GridParams gp = microenv.getGridParams();
                 ruleEngine.applyAll(cells, microenv.densityBuffer(), gp, current_time);
-
-                // Update motility vectors (before mechanics adds forces)
-                updateMotility(cells, motility, microenv.densityBuffer(),
-                               microenv.getGridParams(), dt_phenotype);
 
                 // Spring attachment: try forming new attachments and update forces
                 tryFormAllAttachments(cells, dt_phenotype);

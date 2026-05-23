@@ -383,6 +383,66 @@ void MetalContext::dispatchIntegrate(id<MTLBuffer> cells,
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Forces-only pipeline: clear_hash → build_hash → compute_forces
+// Does NOT run integrate_positions, allowing CPU motility to be added
+// to velocity before the caller dispatches dispatchIntegrate.
+// ─────────────────────────────────────────────────────────────────────
+void MetalContext::dispatchForcesOnlyPipeline(id<MTLBuffer> cells,
+                                               id<MTLBuffer> hashCounts,
+                                               id<MTLBuffer> hashCells,
+                                               id<MTLBuffer> mechParams,
+                                               id<MTLBuffer> gridParams,
+                                               uint32_t numCells,
+                                               uint32_t maxCells,
+                                               uint32_t numMechVoxels) {
+    id<MTLCommandBuffer> cmdBuffer = [commandQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmdBuffer computeCommandEncoder];
+
+    // ─── 1. Clear spatial hash ───
+    [encoder setComputePipelineState:clearHashPipeline];
+    [encoder setBuffer:hashCounts offset:0 atIndex:0];
+    [encoder setBytes:&numMechVoxels length:sizeof(uint32_t) atIndex:1];
+
+    MTLSize gridSize = MTLSizeMake(numMechVoxels, 1, 1);
+    MTLSize tgSize = optimalThreadgroupSize(clearHashPipeline, numMechVoxels);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // ─── 2. Build spatial hash ───
+    [encoder setComputePipelineState:buildHashPipeline];
+    [encoder setBuffer:cells      offset:0 atIndex:0];
+    [encoder setBuffer:hashCounts offset:0 atIndex:1];
+    [encoder setBuffer:hashCells  offset:0 atIndex:2];
+    [encoder setBuffer:mechParams offset:0 atIndex:3];
+    [encoder setBuffer:gridParams offset:0 atIndex:4];
+    [encoder setBytes:&numCells   length:sizeof(uint32_t) atIndex:5];
+    [encoder setBytes:&maxCells   length:sizeof(uint32_t) atIndex:6];
+
+    gridSize = MTLSizeMake(numCells, 1, 1);
+    tgSize = optimalThreadgroupSize(buildHashPipeline, numCells);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    // ─── 3. Compute forces ───
+    [encoder setComputePipelineState:forcesPipeline];
+    [encoder setBuffer:cells      offset:0 atIndex:0];
+    [encoder setBuffer:hashCounts offset:0 atIndex:1];
+    [encoder setBuffer:hashCells  offset:0 atIndex:2];
+    [encoder setBuffer:mechParams offset:0 atIndex:3];
+    [encoder setBytes:&numCells   length:sizeof(uint32_t) atIndex:4];
+    [encoder setBytes:&maxCells   length:sizeof(uint32_t) atIndex:5];
+
+    gridSize = MTLSizeMake(numCells, 1, 1);
+    tgSize = optimalThreadgroupSize(forcesPipeline, numCells);
+    [encoder dispatchThreads:gridSize threadsPerThreadgroup:tgSize];
+
+    [encoder endEncoding];
+    [cmdBuffer commit];
+
+    lastCommandBuffer = cmdBuffer;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Wait for all GPU work to complete
 // ─────────────────────────────────────────────────────────────────────
 void MetalContext::waitForCompletion() {

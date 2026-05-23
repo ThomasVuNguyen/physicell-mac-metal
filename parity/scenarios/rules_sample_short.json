@@ -1,0 +1,27 @@
+{
+    "name": "rules_sample_short",
+    "description": "Rules sample project, 5 simulated minutes. Tests signal→behavior rules pipeline (O2 modulates cycle/death rates via Hill functions) against PhysiCell reference.",
+    "_note": "Requires a 'rules_sample' binary built from PhysiCell/sample_projects/rules_sample. If missing, scenario is SKIPPED rather than failed.",
+    "base_config": "../../../PhysiCell/sample_projects/rules_sample/config/PhysiCell_settings.xml",
+    "ref_binary": "../../../PhysiCell/rules_sample",
+    "ref_project_root": "../../../PhysiCell",
+    "metal_binary": "../../build/physicell-metal",
+    "metal_project_root": "../..",
+    "overrides": {
+        "max_time": 5,
+        "save_interval": 1,
+        "omp_num_threads": 1,
+        "random_seed": 0
+    },
+    "tolerances": {
+        "position": 0.5,
+        "volume": 20.0,
+        "phase": 0,
+        "substrate_linf": 0.5,
+        "substrate_rmse": 0.1,
+        "voxel_coord": 0.01,
+        "cell_count_abs": 0
+    },
+    "timeout_sec": 600,
+    "fail_on_count_drift": false
+}
